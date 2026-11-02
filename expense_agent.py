@@ -11,6 +11,7 @@ Setup:
 import json
 import os
 import sqlite3
+from datetime import datetime
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -37,29 +38,78 @@ conn.execute(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         amount REAL NOT NULL,
         category TEXT NOT NULL,
-        note TEXT DEFAULT ''
+        note TEXT DEFAULT '',
+        spent_at TEXT
     )
     """
 )
-conn.commit()
 
+# Safe migration: add spent_at column to existing tables that lack it,
+# and backfill old rows with today's date at 00:00.
+columns = [row[1] for row in conn.execute("PRAGMA table_info(expenses)").fetchall()]
+if "spent_at" not in columns:
+    conn.execute("ALTER TABLE expenses ADD COLUMN spent_at TEXT")
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn.execute(
+        "UPDATE expenses SET spent_at = ? WHERE spent_at IS NULL OR spent_at = ''",
+        (f"{today} 00:00",),
+    )
+    conn.commit()
 
 # ---------- 3. Tools (plain Python functions the agent may call) ----------
-def add_expense(amount, category, note=""):
+def format_time_12h(stored_time):
+    """Convert stored 'YYYY-MM-DD HH:MM' to 'YYYY-MM-DD hh:MM AM/PM'."""
+    if not stored_time:
+        return ""
+    try:
+        dt = datetime.strptime(stored_time, "%Y-%m-%d %H:%M")
+        return dt.strftime("%Y-%m-%d %I:%M %p")
+    except ValueError:
+        return stored_time
+
+
+def _parse_spent_at(value):
+    """Parse accepted date/time formats and return (datetime, error_string)."""
+    if value is None or value == "":
+        return datetime.now(), None
+
+    value = value.strip()
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %I:%M %p", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt), None
+        except ValueError:
+            continue
+
+    return None, (
+        f"Error: Invalid date/time '{value}'. "
+        "Use 'YYYY-MM-DD HH:MM', 'YYYY-MM-DD hh:MM AM/PM', or 'YYYY-MM-DD'."
+    )
+
+
+def add_expense(amount, category, note="", spent_at=None):
+    dt, error = _parse_spent_at(spent_at)
+    if error:
+        return error
+
+    stored = dt.strftime("%Y-%m-%d %H:%M")
     conn.execute(
-        "INSERT INTO expenses (amount, category, note) VALUES (?, ?, ?)",
-        (float(amount), category.lower(), note),
+        "INSERT INTO expenses (amount, category, note, spent_at) VALUES (?, ?, ?, ?)",
+        (float(amount), category.lower(), note, stored),
     )
     conn.commit()
     return f"Added {amount} to {category}."
 
+
 def list_expenses():
     rows = conn.execute(
-        "SELECT amount, category, note FROM expenses ORDER BY id"
+        "SELECT amount, category, note, spent_at FROM expenses ORDER BY id"
     ).fetchall()
     if not rows:
         return "No expenses recorded."
-    lines = [f"{amount} - {category} - {note}" for amount, category, note in rows]
+    lines = [
+        f"{amount} - {category} - {note} - {format_time_12h(spent_at)}"
+        for amount, category, note, spent_at in rows
+    ]
     return "\n".join(lines)
 
 
@@ -90,6 +140,14 @@ TOOLS = [
                     "amount": {"type": "number", "description": "Amount spent"},
                     "category": {"type": "string", "description": "e.g. food, travel"},
                     "note": {"type": "string", "description": "Optional detail"},
+                    "spent_at": {
+                        "type": "string",
+                        "description": (
+                            "When the expense happened. Accepts 'YYYY-MM-DD HH:MM' "
+                            "(24-hour), 'YYYY-MM-DD hh:MM AM/PM' (12-hour), or "
+                            "'YYYY-MM-DD' (date only = midnight). Defaults to now."
+                        ),
+                    },
                 },
                 "required": ["amount", "category"],
             },
@@ -119,11 +177,19 @@ TOOLS = [
 
 SYSTEM_PROMPT = (
     "You are an expense helper. Use the tools to record and report expenses. "
-    "Never invent numbers; if you need data, call a tool."
+    "Never invent numbers; if you need data, call a tool. "
+    "A current local time is injected at the start of each user message. "
+    "If the user mentions relative times like 'yesterday', 'this morning', "
+    "'at 3pm', 'noon', or 'midnight', convert them to an exact date and time "
+    "before calling add_expense: treat 'noon' as 12:00 PM and 'midnight' as "
+    "12:00 AM. If the time is unclear, ask the user instead of guessing."
 )
 
 # ---------- 4. The agent loop ----------
 def run_agent(user_message, history):
+    now = datetime.now()
+    current_time_str = now.strftime("%Y-%m-%d %I:%M %p (%A)")
+    history.append({"role": "system", "content": f"Current local time: {current_time_str}"})
     history.append({"role": "user", "content": user_message})
 
     for _ in range(MAX_STEPS):

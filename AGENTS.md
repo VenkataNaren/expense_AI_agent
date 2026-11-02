@@ -41,14 +41,15 @@ EXPENSES_DB_PATH=expenses.db    # optional; defaults to expenses.db
 
 ## How the code is organized (`expense_agent.py`)
 1. **Connect:** `load_dotenv()`, create `OpenAI(base_url=..., api_key=...)`, set `MODEL`.
-2. **Data:** Expenses are stored in a SQLite table (`expenses` table: `id`, `amount`, `category`, `note`) in the file given by `EXPENSES_DB_PATH` (default `expenses.db`). Data persists across restarts.
+2. **Data:** Expenses are stored in a SQLite table (`expenses` table: `id`, `amount`, `category`, `note`, `spent_at`) in the file given by `EXPENSES_DB_PATH` (default `expenses.db`). Data persists across restarts. The `spent_at` column stores the date/time as `YYYY-MM-DD HH:MM` (24-hour local time). A safe migration adds the column to existing databases and backfills old rows with today's date at `00:00`.
 3. **Tools** (plain Python functions):
-   - `add_expense(amount, category, note="")`
+   - `add_expense(amount, category, note="", spent_at=None)`
    - `list_expenses()`
    - `total_by_category(category)`
+   - `format_time_12h(stored_time)` — helper to convert `YYYY-MM-DD HH:MM` to `YYYY-MM-DD hh:MM AM/PM` display
 4. **Tool registry and schemas:** `TOOL_FUNCTIONS` maps tool name to function. `TOOLS` is the JSON "menu" the model sees (name, description, parameters).
-5. **System prompt:** `SYSTEM_PROMPT` tells the model to use tools and never invent numbers.
-6. **Agent loop:** `run_agent(user_message, history)`.
+5. **System prompt:** `SYSTEM_PROMPT` tells the model to use tools, never invent numbers, and convert relative time expressions (yesterday, noon, midnight, etc.) into exact date/times before calling tools.
+6. **Agent loop:** `run_agent(user_message, history)` injects the current local date, time (12-hour AM/PM), and weekday into the history at the start of every user message.
 7. **Chat loop:** `if __name__ == "__main__":` reads input until `quit` or `exit`.
 
 ## The agent loop (core idea)
@@ -82,8 +83,9 @@ Key rules:
 - **Tests must not call the real model or use the real API key.** Test the tool functions directly and, if testing the agent loop, mock the model client. This keeps tests free, fast, and repeatable.
 - Each test gets a fresh temporary database (via pytest `tmp_path`) so tests don't affect each other. The database path is set through `EXPENSES_DB_PATH`.
 - What to cover:
-  - Each tool: `add_expense`, `list_expenses`, `total_by_category`
+  - Each tool: `add_expense`, `list_expenses`, `total_by_category`, `format_time_12h`
   - Edge cases: empty list, unknown category, mixed-case category (categories are stored lowercase), amount given as a string or number
+  - Time edge cases: default spent_at is current time, 24-hour input, 12-hour AM/PM input, 12 AM -> 00:00, 12 PM -> 12:00, date-only -> 00:00, invalid value returns error, migration backfills missing spent_at column
   - Agent loop (mocked model): returns text when there are no tool calls, runs a requested tool, returns an error string instead of crashing on a bad tool call, and stops at `MAX_STEPS`
 - When adding a new tool, add a test for it in the same change.
 - Before saying a change is done, run `pytest` and report the result.
