@@ -10,6 +10,7 @@ Setup:
 """
 import json
 import os
+import sqlite3
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -27,21 +28,47 @@ MAX_STEPS = 5  # safety limit so the loop can never run forever
 
 
 # ---------- 2. Our tiny "database" ----------
-expenses = []
+DB_PATH = os.environ.get("EXPENSES_DB_PATH", "expenses.db")
+
+conn = sqlite3.connect(DB_PATH)
+conn.execute(
+    """
+    CREATE TABLE IF NOT EXISTS expenses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        amount REAL NOT NULL,
+        category TEXT NOT NULL,
+        note TEXT DEFAULT ''
+    )
+    """
+)
+conn.commit()
 
 
 # ---------- 3. Tools (plain Python functions the agent may call) ----------
 def add_expense(amount, category, note=""):
-    expenses.append(
-        {"amount": float(amount), "category": category.lower(), "note": note}
+    conn.execute(
+        "INSERT INTO expenses (amount, category, note) VALUES (?, ?, ?)",
+        (float(amount), category.lower(), note),
     )
+    conn.commit()
     return f"Added {amount} to {category}."
 
 def list_expenses():
-    return json.dumps(expenses) if expenses else "No expenses recorded."
+    rows = conn.execute(
+        "SELECT amount, category, note FROM expenses ORDER BY id"
+    ).fetchall()
+    if not rows:
+        return "No expenses recorded."
+    lines = [f"{amount} - {category} - {note}" for amount, category, note in rows]
+    return "\n".join(lines)
+
 
 def total_by_category(category):
-    total = sum(e["amount"] for e in expenses if e["category"] == category.lower())
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE category = ?",
+        (category.lower(),),
+    ).fetchone()
+    total = row[0]
     return f"Total for {category}: {total}"
 
 TOOL_FUNCTIONS = {

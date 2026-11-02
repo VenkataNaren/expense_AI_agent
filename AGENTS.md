@@ -23,8 +23,9 @@ A **simple single-agent learning project** in Python. One AI agent chats with th
 | `.env` | Real secrets and settings. **Never read aloud, print, commit, or share.** |
 | `.env.example` | Safe template with fake values (optional; may not exist in the project folder) |
 | `test_expense_agent.py` | pytest tests for the project |
+| `expenses.db` | SQLite database storing expenses (created on first run). Excluded from git. |
 | `.pytest_cache/`, `__pycache__/` | Auto-generated; ignore, never edit |
-| `.gitignore` | Excludes `.env` and `__pycache__/` |
+| `.gitignore` | Excludes `.env`, `__pycache__/`, `expenses.db` |
 | `AGENTS.md` | This file |
 
 ## Configuration (`.env`)
@@ -32,6 +33,7 @@ A **simple single-agent learning project** in Python. One AI agent chats with th
 NVIDIA_API_KEY=nvapi-...        # secret
 NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
 NVIDIA_MODEL=nvidia/nemotron-3.5-super-vl-120b-a12b
+EXPENSES_DB_PATH=expenses.db    # optional; defaults to expenses.db
 ```
 - No quotes or spaces around values.
 - The script calls `load_dotenv()`, then reads `os.environ[...]`.
@@ -39,7 +41,7 @@ NVIDIA_MODEL=nvidia/nemotron-3.5-super-vl-120b-a12b
 
 ## How the code is organized (`expense_agent.py`)
 1. **Connect:** `load_dotenv()`, create `OpenAI(base_url=..., api_key=...)`, set `MODEL`.
-2. **Data:** `expenses = []` is an in-memory list. Data resets on restart.
+2. **Data:** Expenses are stored in a SQLite table (`expenses` table: `id`, `amount`, `category`, `note`) in the file given by `EXPENSES_DB_PATH` (default `expenses.db`). Data persists across restarts.
 3. **Tools** (plain Python functions):
    - `add_expense(amount, category, note="")`
    - `list_expenses()`
@@ -78,7 +80,7 @@ Key rules:
 - Run from the project folder: `pytest` (or `pytest -v` for detail, `pytest test_expense_agent.py::test_name` for one test).
 - Install if missing: `pip install pytest`
 - **Tests must not call the real model or use the real API key.** Test the tool functions directly and, if testing the agent loop, mock the model client. This keeps tests free, fast, and repeatable.
-- State is a module-level list (`expenses`), so reset it before each test (for example `expenses.clear()` in a fixture) so tests don't affect each other.
+- Each test gets a fresh temporary database (via pytest `tmp_path`) so tests don't affect each other. The database path is set through `EXPENSES_DB_PATH`.
 - What to cover:
   - Each tool: `add_expense`, `list_expenses`, `total_by_category`
   - Edge cases: empty list, unknown category, mixed-case category (categories are stored lowercase), amount given as a string or number
@@ -87,7 +89,7 @@ Key rules:
 - Before saying a change is done, run `pytest` and report the result.
 
 ## Known limits and notes
-- Data is in memory only (no persistence yet).
+- Data persists in SQLite (`expenses.db` by default); no JSON file yet.
 - No input validation beyond what the model sends (for example, negative amounts are not rejected).
 - No human-approval step before actions. Add one before any delete or other irreversible tool.
 - The model is early access and may change or behave differently from stable models. Tool-calling behavior has not been fully tested.
@@ -95,10 +97,10 @@ Key rules:
 - The model accepts images, but this project uses text only.
 
 ## Planned learning steps (in order)
-1. Run it and read the `[tool]` log lines.
+1. Run it and read the `[tool]` log lines. (done)
 2. Add `delete_last_expense`.
 3. Handle an unsupported request (for example, weather) gracefully.
-4. Save expenses to a JSON file (update the tests too).
+4. Save expenses to persistent storage (done — SQLite). (update the tests too)
 5. Add confirmation before deleting (human-in-the-loop).
 6. Later: split into a simple multi-agent project (for example, a recorder agent and a summary agent).
 
