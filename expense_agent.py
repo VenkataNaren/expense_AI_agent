@@ -22,3 +22,17 @@ client = OpenAI(
     api_key=os.environ["NVIDIA_API_KEY"],
 )
 MODEL = os.environ.get("NVIDIA_MODEL", "nvidia/nemotron-3.5-super-vl-120b-a12b")
+
+MAX_STEPS = 5  # safety limit so the loop can never run forever
+
+
+# ---------- 2. Our tiny "database" ----------
+expenses = []
+
+
+# ---------- 3. Tools (plain Python functions the agent may call) ----------
+def add_expense(amount, category, note=""):
+    expenses.append(
+        {"amount": float(amount), "category": category.lower(), "note": note}
+    )
+    return f"Added {amount} to {category}."

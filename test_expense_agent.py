@@ -54,3 +54,47 @@ def test_model_override_from_env():
         }
     )
     assert expense_agent.MODEL == "custom/model"
+
+
+def _fresh_agent():
+    """Reload the module so the in-memory expenses list starts empty."""
+    expense_agent, _ = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+        }
+    )
+    return expense_agent
+
+
+def test_add_expense_records_amount_category_note():
+    """add_expense should append a dict with amount, category, and note."""
+    expense_agent = _fresh_agent()
+    expense_agent.expenses.clear()
+    result = expense_agent.add_expense("10.50", "Food", "lunch")
+    assert result == "Added 10.50 to Food."
+    assert expense_agent.expenses == [
+        {"amount": 10.5, "category": "food", "note": "lunch"}
+    ]
+
+
+def test_add_expense_default_note():
+    """note should default to an empty string when not provided."""
+    expense_agent = _fresh_agent()
+    expense_agent.expenses.clear()
+    expense_agent.add_expense(5, "Transport")
+    assert expense_agent.expenses == [
+        {"amount": 5.0, "category": "transport", "note": ""}
+    ]
+
+
+def test_add_expense_lowercases_category():
+    """Categories should be stored lowercase regardless of input case."""
+    expense_agent = _fresh_agent()
+    expense_agent.expenses.clear()
+    expense_agent.add_expense(3, "FOOD")
+    expense_agent.add_expense(2, "Food")
+    assert expense_agent.expenses == [
+        {"amount": 3.0, "category": "food", "note": ""},
+        {"amount": 2.0, "category": "food", "note": ""},
+    ]
