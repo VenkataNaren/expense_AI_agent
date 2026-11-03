@@ -3,7 +3,7 @@
 Read this first. It gives you the full picture of the project so you can answer quickly and accurately.
 
 ## What this project is
-A **simple single-agent learning project** in Python. One AI agent chats with the user and uses three tools to record and report expenses. It is a stepping stone before a simple multi-agent project.
+A **simple single-agent learning project** in Python. One AI agent chats with the user and uses four tools (add, list, total-by-category, delete) to record, report, and remove expenses. It is a stepping stone before a simple multi-agent project.
 
 - **Goal:** understand the single-agent tool-use loop (ReAct style) end to end.
 - **Not a goal:** production quality, a UI, or multi-agent design (that comes later).
@@ -45,12 +45,13 @@ EXPENSES_DB_PATH=expenses.db    # optional; defaults to expenses.db
 1. **Connect:** `load_dotenv()`, create `OpenAI(base_url=..., api_key=...)`, set `MODEL`.
 2. **Data:** Expenses are stored in a SQLite table (`expenses` table: `id`, `amount`, `category`, `note`, `spent_at`) in the file given by `EXPENSES_DB_PATH` (default `expenses.db`). Data persists across restarts. The `spent_at` column stores the date/time as `YYYY-MM-DD HH:MM` (24-hour local time). A safe migration adds the column to existing databases and backfills old rows with today's date at `00:00`.
 3. **Tools** (plain Python functions):
-   - `add_expense(amount, category, note="", spent_at=None)`
+   - `add_expense(amount, category, note="", spent_at=None, confirm=None)` — records a new expense. If the timestamp is in the future, it previews the expense and asks `"Are you sure you want to add this record? (y/n)"` (no row is inserted). Call again with `confirm="y"` to add, or `confirm="n"` to cancel. Non-future timestamps are inserted immediately.
    - `list_expenses()`
    - `total_by_category(category)`
+   - `delete_expense(id=None, note=None, amount=None, spent_at=None, confirm=None)` — deletes expenses matching all provided criteria. Uses a **mandatory y/n confirmation guardrail**: calling without `confirm` previews matches and asks `"Are you sure you want to delete this record? (y/n)"` (no rows are deleted). Call again with `confirm="y"` to delete, or `confirm="n"` to cancel.
    - `format_time_12h(stored_time)` — helper to convert `YYYY-MM-DD HH:MM` to `YYYY-MM-DD hh:MM AM/PM` display
 4. **Tool registry and schemas:** `TOOL_FUNCTIONS` maps tool name to function. `TOOLS` is the JSON "menu" the model sees (name, description, parameters).
-5. **System prompt:** `SYSTEM_PROMPT` tells the model to use tools, never invent numbers, and convert relative time expressions (yesterday, noon, midnight, etc.) into exact date/times before calling tools.
+5. **System prompt:** `SYSTEM_PROMPT` tells the model to use tools, never invent numbers, convert relative time expressions into exact date/times, and use the delete-then-add confirmation flow when correcting mistakes. It also covers the future-dated expense confirmation flow for `add_expense`.
 6. **Agent loop:** `run_agent(user_message, history)` injects the current local date, time (12-hour AM/PM), and weekday into the history at the start of every user message.
 7. **Chat loop:** `if __name__ == "__main__":` reads input until `quit` or `exit`.
 
@@ -85,9 +86,11 @@ Key rules:
 - **Tests must not call the real model or use the real API key.** Test the tool functions directly and, if testing the agent loop, mock the model client. This keeps tests free, fast, and repeatable.
 - Each test gets a fresh temporary database (via pytest `tmp_path`) so tests don't affect each other. The database path is set through `EXPENSES_DB_PATH`.
 - What to cover:
-  - Each tool: `add_expense`, `list_expenses`, `total_by_category`, `format_time_12h`
+  - Each tool: `add_expense`, `list_expenses`, `total_by_category`, `delete_expense`, `format_time_12h`
   - Edge cases: empty list, unknown category, mixed-case category (categories are stored lowercase), amount given as a string or number
-  - Time edge cases: default spent_at is current time, 24-hour input, 12-hour AM/PM input, 12 AM -> 00:00, 12 PM -> 12:00, date-only -> 00:00, invalid value returns error, migration backfills missing spent_at column
+  - Delete guardrail: preview without `confirm` (no deletion), `confirm="y"` deletes, `confirm="n"` cancels, no-criteria error, invalid timestamp error, no-match message
+  - Add guardrail: future-dated expense previews and asks `(y/n)`, `confirm="y"` adds, `confirm="n"` cancels, non-future timestamps insert immediately
+  - Time edge cases: default spent_at is current time, 24-hour input, 12-hour AM/PM input, 12 AM -> 00:00, 12 PM -> 12:00, date-only -> 00:00, invalid value returns error, future timestamp requires confirmation, migration backfills missing spent_at column
   - Agent loop (mocked model): returns text when there are no tool calls, runs a requested tool, returns an error string instead of crashing on a bad tool call, and stops at `MAX_STEPS`
 - When adding a new tool, add a test for it in the same change.
 - Before saying a change is done, run `pytest` and report the result.
@@ -104,18 +107,16 @@ Key rules:
 ## Known limits and notes
 - Data persists in SQLite (`expenses.db` by default); no JSON file yet.
 - No input validation beyond what the model sends (for example, negative amounts are not rejected).
-- No human-approval step before actions. Add one before any delete or other irreversible tool.
 - The model is early access and may change or behave differently from stable models. Tool-calling behavior has not been fully tested.
 - A reasoning model may pause to think before replying.
 - The model accepts images, but this project uses text only.
 
 ## Planned learning steps (in order)
 1. Run it and read the `[tool]` log lines. (done)
-2. Add `delete_last_expense`.
+2. Add `delete_expense` with y/n confirmation guardrail. (done)
 3. Handle an unsupported request (for example, weather) gracefully.
 4. Save expenses to persistent storage (done — SQLite). (update the tests too)
-5. Add confirmation before deleting (human-in-the-loop).
-6. Later: split into a simple multi-agent project (for example, a recorder agent and a summary agent).
+5. Later: split into a simple multi-agent project (for example, a recorder agent and a summary agent).
 
 ## How to help me
 - Explain in **plain language with simple analogies**, then show the code.

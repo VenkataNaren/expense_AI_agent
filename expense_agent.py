@@ -101,22 +101,64 @@ def _parse_spent_at(value):
     )
 
 
-def add_expense(amount, category, note="", spent_at=None):
+def add_expense(amount, category, note="", spent_at=None, confirm=None):
+    """Record a new expense, with confirmation guardrail for future timestamps."""
     dt, error = _parse_spent_at(spent_at)
     if error:
         return error
 
-    stored = dt.strftime("%Y-%m-%d %H:%M")
+    confirm = (confirm or "").strip().lower()
+    now = datetime.now()
+
+    if dt > now:
+        details = {
+            "amount": float(amount),
+            "category": category.lower(),
+            "note": note,
+            "spent_at": dt.strftime("%Y-%m-%d %H:%M"),
+            "display_amount": amount,
+            "display_category": category,
+        }
+
+        if confirm in ("y", "yes"):
+            _PENDING_ADD = {"details": None}
+            return _perform_add(details)
+
+        if confirm in ("n", "no"):
+            _PENDING_ADD = {"details": None}
+            return "Expense addition cancelled. No changes were made."
+
+        _PENDING_ADD = {"details": details}
+        return (
+            f"Found a future-dated expense to add:\n"
+            f"{details['display_amount']} - {details['category']} - {details['note']} - "
+            f"{format_time_12h(details['spent_at'])}\n\n"
+            "The date/time is in the future. Are you sure you want to add this record? (y/n)"
+        )
+
+    details = {
+        "amount": float(amount),
+        "category": category.lower(),
+        "note": note,
+        "spent_at": dt.strftime("%Y-%m-%d %H:%M"),
+        "display_amount": amount,
+        "display_category": category,
+    }
+    return _perform_add(details)
+
+
+def _perform_add(details):
+    """Insert an expense row into the database."""
     conn = _connect()
     try:
         conn.execute(
             "INSERT INTO expenses (amount, category, note, spent_at) VALUES (?, ?, ?, ?)",
-            (float(amount), category.lower(), note, stored),
+            (details["amount"], details["category"], details["note"], details["spent_at"]),
         )
         conn.commit()
     finally:
         conn.close()
-    return f"Added {amount} to {category}."
+    return f"Added {details['display_amount']} to {details['display_category']}."
 
 
 def list_expenses():
@@ -148,10 +190,141 @@ def total_by_category(category):
     total = row[0]
     return f"Total for {category}: {total}"
 
+
+def delete_expense(id=None, note=None, amount=None, spent_at=None):
+    """Delete expense(s) matching all provided criteria (id, note, amount, spent_at)."""
+    conditions = []
+    params = []
+    if id is not None:
+        conditions.append("id = ?")
+        params.append(int(id))
+    if note is not None:
+        conditions.append("note = ?")
+        params.append(note)
+    if amount is not None:
+        conditions.append("amount = ?")
+        params.append(float(amount))
+    if spent_at is not None:
+        dt, error = _parse_spent_at(spent_at)
+        if error:
+            return error
+        conditions.append("spent_at = ?")
+        params.append(dt.strftime("%Y-%m-%d %H:%M"))
+
+    if not conditions:
+        return (
+            "Error: Please specify at least one of id, note, amount, or spent_at "
+            "to identify the expense to delete."
+        )
+
+    where = " AND ".join(conditions)
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            f"SELECT id, amount, category, note, spent_at FROM expenses WHERE {where}",
+            params,
+        ).fetchall()
+        if not rows:
+            return "No matching expense found."
+        conn.execute(f"DELETE FROM expenses WHERE {where}", params)
+        conn.commit()
+    finally:
+        conn.close()
+
+    deleted = [
+        f"id {r[0]}: {r[1]} - {r[2]} - {r[3]} - {format_time_12h(r[4])}" for r in rows
+    ]
+    return "Deleted:\n" + "\n".join(deleted)
+
+
+# Pending deletion state for the y/n confirmation guardrail.
+# Stores the matching rows until the user confirms with "y"/"yes".
+_PENDING_DELETE = {"criteria": None, "rows": None}
+
+# Pending add state for future-dated expenses requiring confirmation.
+# Stores the expense details until the user confirms with "y"/"yes".
+_PENDING_ADD = {"details": None}
+
+
+def delete_expense(id=None, note=None, amount=None, spent_at=None, confirm=None):
+    """Delete expense(s) matching all provided criteria, with y/n confirmation guardrail.
+
+    Phase 1: Call without confirm (or confirm != "y"/"yes") to preview matches and
+    request confirmation. No rows are deleted.
+    Phase 2: Call with confirm="y" to actually delete the pending matches.
+    Call with confirm="n" to cancel.
+    """
+    confirm = (confirm or "").strip().lower()
+
+    conditions = []
+    params = []
+    if id is not None:
+        conditions.append("id = ?")
+        params.append(int(id))
+    if note is not None:
+        conditions.append("note = ?")
+        params.append(note)
+    if amount is not None:
+        conditions.append("amount = ?")
+        params.append(float(amount))
+    if spent_at is not None:
+        dt, error = _parse_spent_at(spent_at)
+        if error:
+            return error
+        conditions.append("spent_at = ?")
+        params.append(dt.strftime("%Y-%m-%d %H:%M"))
+
+    if not conditions:
+        return (
+            "Error: Please specify at least one of id, note, amount, or spent_at "
+            "to identify the expense to delete."
+        )
+
+    where = " AND ".join(conditions)
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            f"SELECT id, amount, category, note, spent_at FROM expenses WHERE {where}",
+            params,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return "No matching expense found."
+
+    details = [
+        f"ID {r[0]}: {r[1]} - {r[2]} - {r[3]} - {format_time_12h(r[4])}" for r in rows
+    ]
+    preview = "\n".join(details)
+
+    if confirm in ("y", "yes"):
+        conn = _connect()
+        try:
+            conn.execute(f"DELETE FROM expenses WHERE {where}", params)
+            conn.commit()
+        finally:
+            conn.close()
+        _PENDING_DELETE = {"criteria": None, "rows": None}
+        return f"Deleted {len(rows)} record(s):\n{preview}"
+
+    if confirm in ("n", "no"):
+        _PENDING_DELETE = {"criteria": None, "rows": None}
+        return "Deletion cancelled. No changes were made."
+
+    # Pending confirmation: store state, do NOT delete.
+    _PENDING_DELETE = {"criteria": (id, note, amount, spent_at), "rows": rows}
+    return (
+        f"Found {len(rows)} matching expense(s) to delete:\n{preview}\n\n"
+        "Are you sure you want to delete this record? (y/n)"
+    )
+
+
 TOOL_FUNCTIONS = {
     "add_expense": add_expense,
     "list_expenses": list_expenses,
     "total_by_category": total_by_category,
+    "delete_expense": delete_expense,
 }
 
 # The "menu" the model sees: name + description + inputs for each tool
@@ -173,6 +346,14 @@ TOOLS = [
                             "When the expense happened. Accepts 'YYYY-MM-DD HH:MM' "
                             "(24-hour), 'YYYY-MM-DD hh:MM AM/PM' (12-hour), or "
                             "'YYYY-MM-DD' (date only = midnight). Defaults to now."
+                        ),
+                    },
+                    "confirm": {
+                        "type": "string",
+                        "description": (
+                            'Confirmation flag. Set to "y" or "yes" to actually add a '
+                            "future-dated expense after previewing it; 'n' or 'no' to cancel. "
+                            "Omit to preview a future-dated expense and request confirmation."
                         ),
                     },
                 },
@@ -200,6 +381,44 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_expense",
+            "description": "Delete an expense record by ID, note (description), amount, and/or timestamp. Provide at least one criterion; all provided criteria must match.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "integer",
+                        "description": "The expense ID (shown in the expense list)",
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "Exact description/note of the expense",
+                    },
+                    "amount": {"type": "number", "description": "Amount spent"},
+                    "spent_at": {
+                        "type": "string",
+                        "description": (
+                            "When the expense happened. Accepts 'YYYY-MM-DD HH:MM' "
+                            "(24-hour), 'YYYY-MM-DD hh:MM AM/PM' (12-hour), or "
+                            "'YYYY-MM-DD' (date only = midnight)."
+                        ),
+                    },
+                    "confirm": {
+                        "type": "string",
+                        "description": (
+                            'Confirmation flag. Set to "y" or "yes" to actually perform '
+                            'the deletion after previewing matches; "n" or "no" to cancel. '
+                            "Omit to preview matches and request confirmation."
+                        ),
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 SYSTEM_PROMPT = (
@@ -209,7 +428,20 @@ SYSTEM_PROMPT = (
     "If the user mentions relative times like 'yesterday', 'this morning', "
     "'at 3pm', 'noon', or 'midnight', convert them to an exact date and time "
     "before calling add_expense: treat 'noon' as 12:00 PM and 'midnight' as "
-    "12:00 AM. If the time is unclear, ask the user instead of guessing."
+    "12:00 AM. If the time is unclear, ask the user instead of guessing. "
+    "If a user wants to correct or remove an expense (duplicate, wrong amount, wrong "
+    "timestamp), call delete_expense WITHOUT the confirm argument first to preview "
+    "the matching record(s) and request confirmation. Present the record details to "
+    "the user and ask: 'Are you sure you want to delete this record? (y/n)'. "
+    "Wait for the user's reply: if they say 'y'/'yes', call delete_expense again "
+    'with confirm="y" to perform the deletion; if they say "n"/"no", call delete_expense '
+    'with confirm="n" to cancel. Then, if deleting, use add_expense to add the corrected '
+    "record with the right details and timestamp. Confirm to the user what was deleted "
+    "and what was corrected. "
+    "If add_expense is called with a future-dated timestamp, the tool will preview the "
+    "expense and ask: 'Are you sure you want to add this record? (y/n)'. Wait for the "
+    "user's reply: if they say 'y'/'yes', call add_expense again with confirm='y' to "
+    "actually record it; if they say 'n'/'no', call add_expense with confirm='n' to cancel."
 )
 
 # ---------- 4. The agent loop ----------
@@ -260,4 +492,3 @@ if __name__ == "__main__":
             break
         reply, _ = run_agent(text, history)
         print("Agent:", reply)
- 

@@ -202,6 +202,64 @@ def test_add_expense_invalid_value_returns_error(agent):
     assert result2.startswith("Error:")
 
 
+def test_add_expense_blocks_future_timestamp(agent, monkeypatch):
+    """add_expense should preview (not insert) a future-dated expense and request confirmation."""
+    fixed_now = datetime(2026, 11, 3, 12, 00)
+    import expense_agent as ea_mod
+
+    class DummyDT:
+        now = staticmethod(lambda: fixed_now)
+        strptime = staticmethod(datetime.strptime)
+        strftime = staticmethod(datetime.strftime)
+
+    monkeypatch.setattr(ea_mod, "datetime", DummyDT)
+
+    # Phase 1: preview only, no insertion
+    result = agent.add_expense("10", "Food", "lunch", "2026-11-03 14:30")
+    assert "Are you sure you want to add this record? (y/n)" in result
+    assert "future" in result.lower()
+    assert len(_get_expenses(agent)) == 0  # nothing inserted yet
+    # Phase 2: confirm insertion
+    result = agent.add_expense("10", "Food", "lunch", "2026-11-03 14:30", confirm="y")
+    assert "Added" in result
+    assert len(_get_expenses(agent)) == 1
+
+
+def test_add_expense_cancel_future_timestamp(agent, monkeypatch):
+    """add_expense should cancel a future-dated expense when user replies 'n'."""
+    fixed_now = datetime(2026, 11, 3, 12, 00)
+    import expense_agent as ea_mod
+
+    class DummyDT:
+        now = staticmethod(lambda: fixed_now)
+        strptime = staticmethod(datetime.strptime)
+        strftime = staticmethod(datetime.strftime)
+
+    monkeypatch.setattr(ea_mod, "datetime", DummyDT)
+
+    agent.add_expense("10", "Food", "lunch", "2026-11-03 14:30")  # preview
+    result = agent.add_expense("10", "Food", "lunch", "2026-11-03 14:30", confirm="n")
+    assert result == "Expense addition cancelled. No changes were made."
+    assert len(_get_expenses(agent)) == 0
+
+
+def test_add_expense_allows_past_timestamp(agent, monkeypatch):
+    """add_expense should accept a spent_at that is in the past."""
+    fixed_now = datetime(2026, 11, 3, 14, 30)
+    import expense_agent as ea_mod
+
+    class DummyDT:
+        now = staticmethod(lambda: fixed_now)
+        strptime = staticmethod(datetime.strptime)
+        strftime = staticmethod(datetime.strftime)
+
+    monkeypatch.setattr(ea_mod, "datetime", DummyDT)
+
+    result = agent.add_expense("10", "Food", "lunch", "2026-11-03 12:00")
+    assert "Added" in result
+    assert len(_get_expenses(agent)) == 1
+
+
 def test_format_time_12h_shows_ampm(agent):
     """format_time_12h converts 24-hour storage to 12-hour AM/PM display."""
     assert agent.format_time_12h("2026-11-03 14:30") == "2026-11-03 02:30 PM"
@@ -291,6 +349,153 @@ def test_total_by_category_sums(agent):
 def test_total_by_category_unknown(agent):
     """total_by_category should return zero for a category with no expenses."""
     assert agent.total_by_category("Unknown") == "Total for Unknown: 0"
+
+
+def _get_expenses_with_id(expense_agent):
+    """Fetch all rows including id, ordered by id."""
+    import sqlite3
+
+    conn = sqlite3.connect(expense_agent.DB_PATH)
+    try:
+        rows = conn.execute(
+            "SELECT id, amount, category, note, spent_at FROM expenses ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+    return rows
+
+
+def test_delete_expense_by_note(agent):
+    """delete_expense should preview matches without deleting, then delete on confirm."""
+    agent.add_expense("10.50", "Food", "lunch", "2026-11-03 14:30")
+    agent.add_expense(5, "Transport", "taxi", "2026-11-03 08:15")
+    # Phase 1: preview only, no deletion
+    result = agent.delete_expense(note="lunch")
+    assert "Are you sure you want to delete this record? (y/n)" in result
+    assert "lunch" in result
+    assert len(_get_expenses(agent)) == 2  # nothing deleted yet
+    # Phase 2: confirm deletion
+    result = agent.delete_expense(note="lunch", confirm="y")
+    assert "Deleted 1 record(s)" in result
+    remaining = _get_expenses(agent)
+    assert _strip_spent_at(remaining) == [
+        {"amount": 5.0, "category": "transport", "note": "taxi"}
+    ]
+
+
+def test_delete_expense_by_id(agent):
+    """delete_expense should delete the row matching an exact id on confirm."""
+    agent.add_expense("10.50", "Food", "lunch")
+    agent.add_expense(5, "Transport", "taxi")
+    rows = _get_expenses_with_id(agent)
+    target_id = rows[0][0]
+    result = agent.delete_expense(id=target_id, confirm="y")
+    assert "Deleted 1 record(s)" in result
+    remaining = _get_expenses_with_id(agent)
+    assert len(remaining) == 1
+    assert remaining[0][0] != target_id
+
+
+def test_delete_expense_by_amount(agent):
+    """delete_expense should remove rows matching an exact amount on confirm."""
+    agent.add_expense("10.50", "Food", "lunch")
+    agent.add_expense(10.50, "Food", "dinner")
+    agent.add_expense(5, "Transport", "taxi")
+    result = agent.delete_expense(amount=10.50, confirm="y")
+    assert "Deleted 2 record(s)" in result
+    remaining = _strip_spent_at(_get_expenses(agent))
+    assert remaining == [{"amount": 5.0, "category": "transport", "note": "taxi"}]
+
+
+def test_delete_expense_by_spent_at(agent):
+    """delete_expense should remove rows matching an exact timestamp on confirm."""
+    agent.add_expense("10.50", "Food", "lunch", "2026-11-03 14:30")
+    agent.add_expense(5, "Transport", "taxi", "2026-11-03 08:15")
+    result = agent.delete_expense(spent_at="2026-11-03 14:30", confirm="y")
+    assert "Deleted 1 record(s)" in result
+    remaining = _strip_spent_at(_get_expenses(agent))
+    assert remaining == [{"amount": 5.0, "category": "transport", "note": "taxi"}]
+
+
+def test_delete_expense_12_hour_timestamp(agent):
+    """delete_expense should accept a 12-hour AM/PM timestamp on confirm."""
+    agent.add_expense("10.50", "Food", "lunch", "2026-11-03 02:30 PM")
+    result = agent.delete_expense(spent_at="2026-11-03 02:30 PM", confirm="y")
+    assert "Deleted 1 record(s)" in result
+    assert agent.list_expenses() == "No expenses recorded."
+
+
+def test_delete_expense_by_combination(agent):
+    """delete_expense should require all provided criteria to match on confirm."""
+    agent.add_expense("10.50", "Food", "lunch", "2026-11-03 14:30")
+    agent.add_expense("10.50", "Food", "dinner", "2026-11-03 19:00")
+    result = agent.delete_expense(note="lunch", amount=10.50, confirm="y")
+    assert "Deleted 1 record(s)" in result
+    remaining = _strip_spent_at(_get_expenses(agent))
+    assert remaining == [
+        {"amount": 10.5, "category": "food", "note": "dinner"}
+    ]
+
+
+def test_delete_expense_no_match(agent):
+    """delete_expense should report when nothing matches."""
+    agent.add_expense("10.50", "Food", "lunch")
+    result = agent.delete_expense(note="dinner", confirm="y")
+    assert result == "No matching expense found."
+    assert len(_get_expenses(agent)) == 1
+
+
+def test_delete_expense_no_criteria(agent):
+    """delete_expense should error when no identifying criterion is given."""
+    result = agent.delete_expense()
+    assert result.startswith("Error:")
+
+
+def test_delete_expense_invalid_timestamp(agent):
+    """delete_expense should error on an invalid spent_at value."""
+    result = agent.delete_expense(spent_at="not-a-date")
+    assert result.startswith("Error:")
+
+
+def test_delete_expense_cancel_with_n(agent):
+    """delete_expense should cancel deletion when user replies 'n'."""
+    agent.add_expense("10.50", "Food", "lunch", "2026-11-03 14:30")
+    result = agent.delete_expense(note="lunch")
+    assert "Are you sure you want to delete this record? (y/n)" in result
+    assert len(_get_expenses(agent)) == 1
+    result = agent.delete_expense(note="lunch", confirm="n")
+    assert result == "Deletion cancelled. No changes were made."
+    assert len(_get_expenses(agent)) == 1  # still present
+
+
+def test_delete_expense_cancel_with_no(agent):
+    """delete_expense should cancel deletion when user replies 'no'."""
+    agent.add_expense("10.50", "Food", "lunch", "2026-11-03 14:30")
+    agent.delete_expense(note="lunch")
+    result = agent.delete_expense(note="lunch", confirm="no")
+    assert result == "Deletion cancelled. No changes were made."
+    assert len(_get_expenses(agent)) == 1
+
+
+def test_correct_duplicate_entry(agent):
+    """Correcting a duplicate: delete the wrong entry (with confirmation), then add the corrected one."""
+    # Accidental entry with the wrong timestamp
+    agent.add_expense("10.50", "Food", "lunch", "2026-11-03 14:00")
+    # Phase 1: preview the wrong entry
+    preview = agent.delete_expense(note="lunch", amount=10.50, spent_at="2026-11-03 14:00")
+    assert "Are you sure you want to delete this record? (y/n)" in preview
+    # Phase 2: confirm deletion
+    deleted = agent.delete_expense(
+        note="lunch", amount=10.50, spent_at="2026-11-03 14:00", confirm="y"
+    )
+    assert "Deleted 1 record(s)" in deleted
+    # Add the corrected record with the proper timestamp
+    added = agent.add_expense("10.50", "Food", "lunch", "2026-11-03 14:30")
+    assert "Added" in added
+    expenses = _strip_spent_at(_get_expenses(agent))
+    assert expenses == [{"amount": 10.5, "category": "food", "note": "lunch"}]
+    full = _get_expenses(agent)
+    assert full[0]["spent_at"] == "2026-11-03 14:30"
 
 
 def test_load_expenses_for_table(tmp_path, monkeypatch):
