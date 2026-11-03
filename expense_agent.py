@@ -31,30 +31,45 @@ MAX_STEPS = 5  # safety limit so the loop can never run forever
 # ---------- 2. Our tiny "database" ----------
 DB_PATH = os.environ.get("EXPENSES_DB_PATH", "expenses.db")
 
-conn = sqlite3.connect(DB_PATH)
-conn.execute(
-    """
-    CREATE TABLE IF NOT EXISTS expenses (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        amount REAL NOT NULL,
-        category TEXT NOT NULL,
-        note TEXT DEFAULT '',
-        spent_at TEXT
-    )
-    """
-)
 
-# Safe migration: add spent_at column to existing tables that lack it,
-# and backfill old rows with today's date at 00:00.
-columns = [row[1] for row in conn.execute("PRAGMA table_info(expenses)").fetchall()]
-if "spent_at" not in columns:
-    conn.execute("ALTER TABLE expenses ADD COLUMN spent_at TEXT")
-    today = datetime.now().strftime("%Y-%m-%d")
-    conn.execute(
-        "UPDATE expenses SET spent_at = ? WHERE spent_at IS NULL OR spent_at = ''",
-        (f"{today} 00:00",),
-    )
-    conn.commit()
+def _connect():
+    """Open a fresh SQLite connection for a single operation."""
+    return sqlite3.connect(DB_PATH)
+
+
+def init_db():
+    """Create the table and run the safe migration. Called once at import."""
+    conn = _connect()
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS expenses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                amount REAL NOT NULL,
+                category TEXT NOT NULL,
+                note TEXT DEFAULT '',
+                spent_at TEXT
+            )
+            """
+        )
+
+        # Safe migration: add spent_at column to existing tables that lack it,
+        # and backfill old rows with today's date at 00:00.
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(expenses)").fetchall()]
+        if "spent_at" not in columns:
+            conn.execute("ALTER TABLE expenses ADD COLUMN spent_at TEXT")
+            today = datetime.now().strftime("%Y-%m-%d")
+            conn.execute(
+                "UPDATE expenses SET spent_at = ? WHERE spent_at IS NULL OR spent_at = ''",
+                (f"{today} 00:00",),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+
+# Run once when the module is imported.
+init_db()
 
 # ---------- 3. Tools (plain Python functions the agent may call) ----------
 def format_time_12h(stored_time):
@@ -92,18 +107,26 @@ def add_expense(amount, category, note="", spent_at=None):
         return error
 
     stored = dt.strftime("%Y-%m-%d %H:%M")
-    conn.execute(
-        "INSERT INTO expenses (amount, category, note, spent_at) VALUES (?, ?, ?, ?)",
-        (float(amount), category.lower(), note, stored),
-    )
-    conn.commit()
+    conn = _connect()
+    try:
+        conn.execute(
+            "INSERT INTO expenses (amount, category, note, spent_at) VALUES (?, ?, ?, ?)",
+            (float(amount), category.lower(), note, stored),
+        )
+        conn.commit()
+    finally:
+        conn.close()
     return f"Added {amount} to {category}."
 
 
 def list_expenses():
-    rows = conn.execute(
-        "SELECT amount, category, note, spent_at FROM expenses ORDER BY id"
-    ).fetchall()
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT amount, category, note, spent_at FROM expenses ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
     if not rows:
         return "No expenses recorded."
     lines = [
@@ -114,10 +137,14 @@ def list_expenses():
 
 
 def total_by_category(category):
-    row = conn.execute(
-        "SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE category = ?",
-        (category.lower(),),
-    ).fetchone()
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE category = ?",
+            (category.lower(),),
+        ).fetchone()
+    finally:
+        conn.close()
     total = row[0]
     return f"Total for {category}: {total}"
 
@@ -192,6 +219,8 @@ def run_agent(user_message, history):
     history.append({"role": "system", "content": f"Current local time: {current_time_str}"})
     history.append({"role": "user", "content": user_message})
 
+    tool_calls_made = []
+
     for _ in range(MAX_STEPS):
         response = client.chat.completions.create(
             model=MODEL, messages=history, tools=TOOLS
@@ -201,7 +230,7 @@ def run_agent(user_message, history):
 
         # No tool requested -> the agent is done, return its answer
         if not message.tool_calls:
-            return message.content
+            return message.content, tool_calls_made
 
         # Otherwise run each requested tool and feed the result back
         for call in message.tool_calls:
@@ -212,11 +241,14 @@ def run_agent(user_message, history):
             except Exception as error:  # never crash on a bad tool call
                 result = f"Error: {error}"
             print(f"  [tool] {name} -> {result}")  # simple logging
+            tool_calls_made.append(
+                {"name": name, "args": args, "result": str(result)}
+            )
             history.append(
                 {"role": "tool", "tool_call_id": call.id, "content": str(result)}
             )
 
-    return "Stopped: too many steps."
+    return "Stopped: too many steps.", tool_calls_made
 
 # ---------- 5. Chat with it ----------
 if __name__ == "__main__":
@@ -226,5 +258,6 @@ if __name__ == "__main__":
         text = input("\nYou: ").strip()
         if text.lower() in ("quit", "exit"):
             break
-        print("Agent:", run_agent(text, history))
+        reply, _ = run_agent(text, history)
+        print("Agent:", reply)
  

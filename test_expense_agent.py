@@ -49,7 +49,6 @@ def test_client_instantiated_with_env(tmp_path):
         api_key="test-api-key",
     )
     assert expense_agent.MODEL == "nvidia/nemotron-3.5-super-vl-120b-a12b"
-    expense_agent.conn.close()
 
 
 def test_model_override_from_env(tmp_path):
@@ -64,12 +63,11 @@ def test_model_override_from_env(tmp_path):
         db_path=db_path,
     )
     assert expense_agent.MODEL == "custom/model"
-    expense_agent.conn.close()
 
 
 @pytest.fixture
 def agent(tmp_path):
-    """Fresh agent with a temp database; closes connection after test."""
+    """Fresh agent with a temp database; connections are per-operation, so nothing to close."""
     db_path = tmp_path / "expenses.db"
     expense_agent, _ = _reload_with_env(
         {
@@ -79,14 +77,19 @@ def agent(tmp_path):
         db_path=db_path,
     )
     yield expense_agent
-    expense_agent.conn.close()
 
 
 def _get_expenses(expense_agent):
     """Fetch all rows as a list of dicts (amount, category, note, spent_at)."""
-    rows = expense_agent.conn.execute(
-        "SELECT amount, category, note, spent_at FROM expenses ORDER BY id"
-    ).fetchall()
+    import sqlite3
+
+    conn = sqlite3.connect(expense_agent.DB_PATH)
+    try:
+        rows = conn.execute(
+            "SELECT amount, category, note, spent_at FROM expenses ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
     return [
         {
             "amount": amount,
@@ -245,12 +248,17 @@ def test_migration_adds_spent_at_column(tmp_path):
         },
         db_path=db_path,
     )
-    columns = [row[1] for row in expense_agent.conn.execute("PRAGMA table_info(expenses)").fetchall()]
-    assert "spent_at" in columns
-    rows = expense_agent.conn.execute("SELECT spent_at FROM expenses").fetchall()
-    assert rows[0][0] is not None
-    assert rows[0][0].endswith(" 00:00")
-    expense_agent.conn.close()
+    import sqlite3
+
+    conn = sqlite3.connect(expense_agent.DB_PATH)
+    try:
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(expenses)").fetchall()]
+        assert "spent_at" in columns
+        rows = conn.execute("SELECT spent_at FROM expenses").fetchall()
+        assert rows[0][0] is not None
+        assert rows[0][0].endswith(" 00:00")
+    finally:
+        conn.close()
 
 
 def test_list_expenses_returns_all(agent):
@@ -283,3 +291,43 @@ def test_total_by_category_sums(agent):
 def test_total_by_category_unknown(agent):
     """total_by_category should return zero for a category with no expenses."""
     assert agent.total_by_category("Unknown") == "Total for Unknown: 0"
+
+
+def test_load_expenses_for_table(tmp_path, monkeypatch):
+    """load_expenses_for_table returns rows newest first with 12-hour time."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    ea_mod.add_expense(10, "Food", "lunch", "2026-11-03 14:30")
+    ea_mod.add_expense(5, "Transport", "", "2026-11-03 08:15")
+
+    import app
+    data = app.load_expenses_for_table()
+    assert len(data) == 2
+    # Newest first: Transport (08:15) then Food (14:30)
+    assert data[0]["Category"] == "transport"
+    assert data[0]["Amount"] == 5.0
+    assert "08:15 AM" in data[0]["Date/Time"]
+    assert data[1]["Category"] == "food"
+    assert data[1]["Amount"] == 10.0
+    assert "02:30 PM" in data[1]["Date/Time"]
+
+
+def test_category_totals(tmp_path, monkeypatch):
+    """category_totals sums amounts per category."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    ea_mod.add_expense(10, "Food", "lunch")
+    ea_mod.add_expense(20, "Food", "dinner")
+    ea_mod.add_expense(5, "Transport", "")
+
+    import app
+    totals = app.category_totals()
+    assert totals == {"food": 30.0, "transport": 5.0}

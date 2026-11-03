@@ -13,6 +13,7 @@ A **simple single-agent learning project** in Python. One AI agent chats with th
 - `openai` Python SDK, used against NVIDIA's OpenAI-compatible API
 - `python-dotenv` to load settings from `.env`
 - `pytest` for tests
+- `streamlit` for the optional web UI (`app.py`)
 - Model: `nvidia/nemotron-3.5-super-vl-120b-a12b` (early-access reasoning model, supports tool calling, accepts text/image/video, outputs text)
 - Base URL: `https://integrate.api.nvidia.com/v1`
 
@@ -23,6 +24,7 @@ A **simple single-agent learning project** in Python. One AI agent chats with th
 | `.env` | Real secrets and settings. **Never read aloud, print, commit, or share.** |
 | `.env.example` | Safe template with fake values (optional; may not exist in the project folder) |
 | `test_expense_agent.py` | pytest tests for the project |
+| `app.py` | Streamlit web UI (Chat + Expenses tabs). Run with `streamlit run app.py`. |
 | `expenses.db` | SQLite database storing expenses (created on first run). Excluded from git. |
 | `.pytest_cache/`, `__pycache__/` | Auto-generated; ignore, never edit |
 | `.gitignore` | Excludes `.env`, `__pycache__/`, `expenses.db` |
@@ -89,6 +91,15 @@ Key rules:
   - Agent loop (mocked model): returns text when there are no tool calls, runs a requested tool, returns an error string instead of crashing on a bad tool call, and stops at `MAX_STEPS`
 - When adding a new tool, add a test for it in the same change.
 - Before saying a change is done, run `pytest` and report the result.
+
+## Running the Streamlit UI
+- Install: `pip install streamlit`
+- Run: `streamlit run app.py`
+- The UI has two tabs:
+  - **Chat:** `st.chat_input` and `st.chat_message`. Conversation history lives in `st.session_state`. Under each assistant reply, an expander called "Tool calls" lists the tools used and their results.
+  - **Expenses:** a table of all expenses (newest first, times in 12-hour AM/PM) plus a total per category. Includes a Refresh button.
+- All agent logic lives in `expense_agent.py`; `app.py` only handles display and calls `run_agent`, `load_expenses_for_table`, and `category_totals`.
+- Errors (model, network, database) are shown with `st.error`, never a crash.
 
 ## Known limits and notes
 - Data persists in SQLite (`expenses.db` by default); no JSON file yet.
