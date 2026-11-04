@@ -771,6 +771,54 @@ def test_kiwisaver_performance_no_data(agent):
     assert result == "No Kiwisaver data in the given date range."
 
 
+def test_kiwisaver_performance_max_drawdown_with_adjustment(agent):
+    """kiwisaver_performance max drawdown accounts for mid-period adjustment (cumulative).
+    
+    Day 1: balance 1000 (no adjustment) → effective 1000
+    Day 2: balance 900 (+employer 100) → effective 800
+    Day 3: balance 950 (+employer 100) → effective 850
+    
+    Start: 1000, End: 850, Change: -15%
+    Peak: 1000, Trough: 800 → Max drawdown: 20% around day 2
+    """
+    agent.add_kiwisaver_daily("2026-11-01", 1000.0)
+    agent.add_kiwisaver_daily("2026-11-02", 900.0)
+    agent.add_kiwisaver_daily("2026-11-03", 950.0)
+    agent.add_kiwisaver_adjustment("2026-11-02", 100.0, "employer")
+
+    result = agent.kiwisaver_performance("2026-11-01", "2026-11-03")
+
+    assert "Start value: 1,000.00" in result
+    assert "End value: 850.00" in result
+    assert "Change: -15.00%" in result
+    assert "Max drawdown: 20.00%" in result
+    assert "around 2026-11-02" in result
+
+
+def test_kiwisaver_performance_stale_days(agent):
+    """kiwisaver_performance flags days where balance is unchanged."""
+    agent.add_kiwisaver_daily("2026-11-01", 1000.0)
+    agent.add_kiwisaver_daily("2026-11-02", 1000.0)  # stale
+    agent.add_kiwisaver_daily("2026-11-03", 1100.0)
+
+    result = agent.kiwisaver_performance("2026-11-01", "2026-11-03")
+    assert "Stale days (unchanged balance): 2026-11-02" in result
+
+
+def test_list_kiwisaver_unit_price_basis_with_gap(agent):
+    """list_kiwisaver uses unit price when available on both ends; warns about skipped None row."""
+    agent.add_kiwisaver_daily("2026-11-01", 1000.0, 50.0, 20.0)
+    agent.add_kiwisaver_daily("2026-11-02", 1000.0, 50.0, None)  # unit_price missing
+    agent.add_kiwisaver_daily("2026-11-03", 1100.0, 50.0, 22.0)
+
+    result = agent.list_kiwisaver("2026-11-01", "2026-11-03")
+
+    assert "2026-11-01 - balance 20.0 - change N/A" in result
+    assert "2026-11-02 - balance  - change N/A" in result  # skipped None row
+    assert "2026-11-03 - balance 22.0 - change +10.00%" in result
+    assert "Warning" in result or "skip" in result.lower()
+
+
 def test_list_expenses_returns_all(agent):
     """list_expenses should return every recorded expense."""
     agent.add_expense("10.50", "Food", "lunch")

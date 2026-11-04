@@ -1,8 +1,8 @@
 # Expense Helper
 
-A simple single-agent learning project in Python. One AI agent chats with you and uses four tools (add, list, total-by-category, delete) to record, report, and remove expenses. It is a stepping stone before a simple multi-agent project.
+A simple single-agent learning project in Python. One AI agent chats with you and uses eight tools to record, report, and remove expenses, plus KiwiSaver balance tracking. It is a stepping stone before a simple multi-agent project.
 
-Data persists in a local SQLite database, so your expenses survive across restarts.
+Data persists in a local SQLite database, so your expenses and KiwiSaver balances survive across restarts.
 
 ## Features
 
@@ -12,7 +12,10 @@ Data persists in a local SQLite database, so your expenses survive across restar
 - Delete an expense by ID, note, amount, and/or timestamp
 - Future-dated expenses are previewed first and require confirmation before being added
 - Deletions are previewed first and require confirmation before rows are removed
-- Optional Streamlit web UI with two tabs: Chat and Expenses
+- KiwiSaver: add daily balances (date is unique), add adjustments (employee, employer, government, tax, fee), list daily balances with % change, compute performance summaries
+- KiwiSaver overwrite guardrail: replacing an existing date previews old vs new and requires confirmation
+- KiwiSaver data quality: import from CSV, skip existing dates, flag stale (unchanged) days
+- Optional Streamlit web UI with three tabs: Chat, Expenses, and KiwiSaver (line chart, summary, recent entries)
 - Plain Python scripts — no agent framework, so every step of the tool-use loop is visible
 
 ## Technology stack
@@ -23,6 +26,7 @@ Data persists in a local SQLite database, so your expenses survive across restar
 - SQLite (built into Python) for persistent storage
 - `pytest` for tests
 - `streamlit` for the optional web UI (`app.py`)
+- Standard library `datetime` for date parsing
 - Model: `nvidia/nemotron-3.5-super-vl-120b-a12b` (early-access reasoning model, tool-calling support)
 
 ## Files
@@ -30,10 +34,11 @@ Data persists in a local SQLite database, so your expenses survive across restar
 | File | Purpose |
 |---|---|
 | `expense_agent.py` | The whole agent: connection, tools, tool schemas, agent loop, chat prompt |
-| `app.py` | Streamlit web UI (Chat + Expenses tabs). Run with `streamlit run app.py` |
+| `app.py` | Streamlit web UI (Chat + Expenses + KiwiSaver tabs). Run with `streamlit run app.py` |
+| `import_kiwisaver.py` | One-off script: import KiwiSaver daily balances from a CSV into `kiwisaver_daily` |
 | `test_expense_agent.py` | pytest tests |
 | `AGENTS.md` | Developer context and project notes |
-| `.gitignore` | Excludes `.env`, `__pycache__/`, `.pytest_cache/`, `expenses.db` |
+| `.gitignore` | Excludes `.env`, `__pycache__/`, `.pytest_cache/`, `expenses.db`, `*.csv` |
 
 ## Installation and configuration
 
@@ -100,10 +105,11 @@ Agent: 12.5 - food - lunch - 2026-11-05 02:30 PM
 streamlit run app.py
 ```
 
-The UI has two tabs:
+The UI has three tabs:
 
 - **Chat:** type a message with `st.chat_input`; assistant replies appear with `st.chat_message`. Under each assistant reply, an expander called "Tool calls" lists the tools used and their results.
 - **Expenses:** a table of all expenses (newest first, times in 12-hour AM/PM) plus a total per category. Includes a Refresh button.
+- **KiwiSaver:** a line chart of balance over time, a performance summary from `kiwisaver_performance`, and a table of recent entries. Includes a Refresh button.
 
 Errors (model, network, database) are shown with `st.error`, never a crash.
 
@@ -113,7 +119,7 @@ Errors (model, network, database) are shown with `st.error`, never a crash.
 
 `expense_agent.py` loads settings from `.env`, creates an `OpenAI` client pointed at NVIDIA's base URL, and selects the model from `NVIDIA_MODEL` (or the default).
 
-### Tools (the four things the agent can do)
+### Tools (ten things the agent can do)
 
 | Tool | What it does |
 |---|---|
@@ -121,6 +127,12 @@ Errors (model, network, database) are shown with `st.error`, never a crash.
 | `list_expenses` | Shows every recorded expense with its 12-hour display time. |
 | `total_by_category` | Adds up all expenses in one category. |
 | `delete_expense` | Deletes expenses matching all provided criteria (id, note, amount, spent_at). Requires at least one criterion. |
+| `add_kiwisaver_daily` | Inserts or replaces a KiwiSaver daily balance row (date is unique). Validates balance > 0, date format, and future dates. Warns if units × unit_price differs from balance by >1%. |
+| `list_kiwisaver_daily` | Lists all KiwiSaver daily balance rows. |
+| `add_kiwisaver_adjustment` | Inserts a KiwiSaver adjustment row. Type must be employee, employer, government, tax, or fee; amount must not be zero. |
+| `list_kiwisaver_adjustments` | Lists all KiwiSaver adjustment rows. |
+| `list_kiwisaver` | Lists KiwiSaver daily balances in date order with daily % change. Optionally filter by start_date and/or end_date. |
+| `kiwisaver_performance` | Computes Kiwisaver performance between two dates: start/end value, % change, best/worst day, max drawdown, day count, stale days. |
 
 Amounts can be numbers or strings. Categories are stored lowercase.
 
@@ -128,6 +140,7 @@ Amounts can be numbers or strings. Categories are stored lowercase.
 
 - **Future-dated add:** if `spent_at` is in the future, the tool previews the expense and asks `Are you sure you want to add this record? (y/n)` without inserting anything. Call again with `confirm="y"` to add, or `confirm="n"` to cancel. Non-future timestamps insert immediately.
 - **Delete:** calling `delete_expense` without `confirm` previews matching rows and asks `Are you sure you want to delete this record? (y/n)` without deleting anything. Call again with `confirm="y"` to delete, or `confirm="n"` to cancel. Calling with no criteria returns an error.
+- **KiwiSaver overwrite:** `add_kiwisaver_daily` with a date that already exists previews old vs new balance and asks `Are you sure you want to overwrite? (y/n)`. Call again with `confirm="y"` to overwrite, or `confirm="n"` to cancel. New dates insert immediately.
 
 ### Agent loop
 
@@ -156,7 +169,25 @@ The model is instructed by `SYSTEM_PROMPT` to use tools, never invent numbers, c
 | `note` | `TEXT DEFAULT ''` | Optional description |
 | `spent_at` | `TEXT` | Stored as `YYYY-MM-DD HH:MM` (24-hour local time) |
 
-- A safe migration adds the `spent_at` column to existing databases that lack it and backfills old rows with today's date at `00:00`.
+- Table `kiwisaver_daily`:
+
+| Column | Type | Notes |
+|---|---|---|
+| `date` | `TEXT UNIQUE` | `YYYY-MM-DD`, one row per date |
+| `balance` | `REAL NOT NULL` | KiwiSaver balance |
+| `units` | `REAL` | Number of units (optional) |
+| `unit_price` | `REAL` | Price per unit (optional) |
+
+- Table `kiwisaver_adjustments`:
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INTEGER PRIMARY KEY AUTOINCREMENT` | Row identifier |
+| `date` | `TEXT` | Adjustment date |
+| `amount` | `REAL` | Adjustment amount (can be negative) |
+| `type` | `TEXT` | `employee`, `employer`, `government`, `tax`, or `fee` |
+
+- Safe migrations add missing columns to existing KiwiSaver tables if an older version exists.
 - Data persists across restarts. Excluded from git by `.gitignore`.
 
 ### Helper
@@ -184,9 +215,17 @@ pytest -v
 pytest test_expense_agent.py::test_add_expense_records_amount_category_note
 ```
 
+### Import KiwiSaver CSV
+
+```powershell
+python import_kiwisaver.py kiwisaver.csv
+```
+
+Reads columns `Date` and `KIWI Saver` (flexible column names). Parses dates like `"Thursday, 15 October 2026"` and balances like `"21,156.25"`. Skips dates already in the database (no overwrite). Prints a data-quality report flagging days where the balance is identical to the previous day — these are **not** modified or deleted. The CSV stays out of git (`*.csv` is in `.gitignore`).
+
 ## Known limits
 
-- No input validation beyond what the model sends (for example, negative amounts are not rejected).
+- Expense input has no validation beyond what the model sends (for example, negative expense amounts are not rejected). KiwiSaver tools do validate balance > 0, non-zero adjustment amounts, valid types, date formats, and future dates.
 - The model is early access and may change or behave differently from stable models. Tool-calling behavior has not been fully tested.
 - A reasoning model may pause to think before replying.
 - The model accepts images, but this project uses text only.

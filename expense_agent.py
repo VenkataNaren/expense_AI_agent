@@ -582,17 +582,24 @@ def list_kiwisaver_adjustments():
     return "\n".join(lines)
 
 
-def list_kiwisaver(start_date=None, end_date=None):
-    """List KiwiSaver daily balances in date order with daily % change."""
-    # Validate date filters if provided
+def _build_kiwisaver_series(start_date=None, end_date=None):
+    """Build the KiwiSaver series for a date range.
+
+    Picks the basis: unit_price if present on both the first and last row
+    (ignores contributions), otherwise balance minus cumulative adjustments
+    up to each date. Returns (series, metadata) or (None, error_string).
+    """
+    # Validate dates if provided
     if start_date is not None:
         start_date, error = _parse_kiwisaver_date(start_date)
         if error:
-            return error
+            return None, error
     if end_date is not None:
         end_date, error = _parse_kiwisaver_date(end_date)
         if error:
-            return error
+            return None, error
+    if start_date is not None and end_date is not None and start_date > end_date:
+        return None, "Error: start_date must be on or before end_date."
 
     conditions = []
     params = []
@@ -602,7 +609,6 @@ def list_kiwisaver(start_date=None, end_date=None):
     if end_date is not None:
         conditions.append("date <= ?")
         params.append(end_date)
-
     where = " AND ".join(conditions)
     if where:
         where = "WHERE " + where
@@ -610,25 +616,174 @@ def list_kiwisaver(start_date=None, end_date=None):
     conn = _connect()
     try:
         rows = conn.execute(
-            f"SELECT date, balance FROM kiwisaver_daily {where} ORDER BY date",
+            f"""
+            SELECT date, balance, units, unit_price
+            FROM kiwisaver_daily
+            {where}
+            ORDER BY date
+            """,
+            params,
+        ).fetchall()
+        adjustments = conn.execute(
+            f"""
+            SELECT date, amount
+            FROM kiwisaver_adjustments
+            {where}
+            ORDER BY date
+            """,
             params,
         ).fetchall()
     finally:
         conn.close()
 
     if not rows:
-        return "No Kiwisaver daily balances recorded."
+        if start_date is None and end_date is None:
+            return None, "No Kiwisaver daily balances recorded."
+        return None, "No Kiwisaver data in the given date range."
+
+    # Build cumulative adjustment sums per date (balance basis only).
+    adj_by_date = {}
+    for adj_date, amount in adjustments:
+        adj_by_date[adj_date] = adj_by_date.get(adj_date, 0.0) + float(amount)
+
+    sorted_adj_dates = sorted(adj_by_date.keys())
+    cumulative_adj = 0.0
+    adj_index = 0
+    adj_cumulative_by_date = {}
+    for date, _balance, _units, _unit_price in rows:
+        while adj_index < len(sorted_adj_dates) and sorted_adj_dates[adj_index] <= date:
+            cumulative_adj += adj_by_date[sorted_adj_dates[adj_index]]
+            adj_index += 1
+        adj_cumulative_by_date[date] = cumulative_adj
+
+    # Determine basis: unit_price if present on both ends.
+    first_unit_price = rows[0][3]
+    last_unit_price = rows[-1][3]
+    use_unit_price = first_unit_price is not None and last_unit_price is not None
+
+    series = []
+    prev_basis_value = None
+    stale_days = []
+    daily_changes = []  # (date, pct)
+    skipped_rows = []
+    peak = None
+    max_drawdown = 0.0
+    max_drawdown_date = None
+
+    for date, balance, units, unit_price in rows:
+        if use_unit_price:
+            basis_value = unit_price
+            if unit_price is None:
+                skipped_rows.append(date)
+                series.append(
+                    {
+                        "date": date,
+                        "basis_value": None,
+                        "raw_balance": balance,
+                        "raw_unit_price": None,
+                        "daily_pct_change": "N/A",
+                        "is_stale": False,
+                    }
+                )
+                # Keep the last valid basis_value so a later row can still
+                # compute a % change across the gap.
+                continue
+        else:
+            basis_value = balance - adj_cumulative_by_date.get(date, 0.0)
+
+        # Daily % change vs previous row.
+        if (
+            prev_basis_value is not None
+            and basis_value is not None
+            and prev_basis_value != 0
+        ):
+            pct = ((basis_value - prev_basis_value) / prev_basis_value) * 100
+            daily_pct_change = f"{pct:+.2f}%"
+            daily_changes.append((date, pct))
+        else:
+            daily_pct_change = "N/A"
+
+        # Stale day: basis value unchanged from previous row.
+        is_stale = (
+            prev_basis_value is not None
+            and basis_value is not None
+            and basis_value == prev_basis_value
+        )
+        if is_stale:
+            stale_days.append(date)
+
+        # Max drawdown: peak-to-trough decline on basis value.
+        if basis_value is not None:
+            if peak is None or basis_value > peak:
+                peak = basis_value
+            drawdown = ((peak - basis_value) / peak) * 100 if peak else 0.0
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+                max_drawdown_date = date
+
+        series.append(
+            {
+                "date": date,
+                "basis_value": basis_value,
+                "raw_balance": balance,
+                "raw_unit_price": unit_price,
+                "daily_pct_change": daily_pct_change,
+                "is_stale": is_stale,
+            }
+        )
+        prev_basis_value = basis_value
+
+    start_value = series[0]["basis_value"]
+    end_value = series[-1]["basis_value"]
+
+    if start_value is not None and start_value != 0 and end_value is not None:
+        pct_change = ((end_value - start_value) / start_value) * 100
+    else:
+        pct_change = 0.0
+
+    best_day = max(daily_changes, key=lambda x: x[1]) if daily_changes else None
+    worst_day = min(daily_changes, key=lambda x: x[1]) if daily_changes else None
+
+    basis_str = "unit price" if use_unit_price else "balance (adjusted for contributions)"
+
+    metadata = {
+        "start_value": start_value,
+        "end_value": end_value,
+        "pct_change": pct_change,
+        "best_day": best_day,
+        "worst_day": worst_day,
+        "max_drawdown": max_drawdown,
+        "max_drawdown_date": max_drawdown_date,
+        "num_days": len(series),
+        "stale_days": stale_days,
+        "skipped_rows": skipped_rows,
+        "basis": basis_str,
+        "use_unit_price": use_unit_price,
+    }
+
+    return series, metadata
+
+
+def list_kiwisaver(start_date=None, end_date=None):
+    """List KiwiSaver daily balances in date order with daily % change."""
+    series_list, meta = _build_kiwisaver_series(start_date, end_date)
+    if series_list is None:
+        # meta is the error string
+        return meta
 
     lines = []
-    prev_balance = None
-    for date, balance in rows:
-        if prev_balance is not None and prev_balance != 0:
-            pct = ((balance - prev_balance) / prev_balance) * 100
-            change = f"{pct:+.2f}%"
-        else:
-            change = "N/A"
-        lines.append(f"{date} - balance {balance} - change {change}")
-        prev_balance = balance
+    for entry in series_list:
+        basis_display = (
+            f"{entry['basis_value']}" if entry["basis_value"] is not None else ""
+        )
+        lines.append(
+            f"{entry['date']} - balance {basis_display} - change {entry['daily_pct_change']}"
+        )
+
+    if meta["skipped_rows"]:
+        lines.append(
+            f"Warning: skipped rows with missing unit price: {', '.join(meta['skipped_rows'])}"
+        )
 
     return "\n".join(lines)
 
@@ -637,123 +792,39 @@ def kiwisaver_performance(start_date, end_date):
     """Compute Kiwisaver performance between start_date and end_date inclusive.
 
     If unit_price exists on both ends, bases the return on unit price
-    (ignores contributions). Otherwise uses balance minus adjustments in the
-    period and flags the result as an estimate.
+    (ignores contributions). Otherwise uses balance minus cumulative
+    adjustments up to each date and flags the result as an estimate.
     """
-    start_date, error = _parse_kiwisaver_date(start_date)
-    if error:
-        return error
-    end_date, error = _parse_kiwisaver_date(end_date)
-    if error:
-        return error
-    if start_date > end_date:
-        return "Error: start_date must be on or before end_date."
-
-    conn = _connect()
-    try:
-        rows = conn.execute(
-            """
-            SELECT date, balance, units, unit_price
-            FROM kiwisaver_daily
-            WHERE date >= ? AND date <= ?
-            ORDER BY date
-            """,
-            (start_date, end_date),
-        ).fetchall()
-        adjustments = conn.execute(
-            """
-            SELECT date, amount, type
-            FROM kiwisaver_adjustments
-            WHERE date >= ? AND date <= ?
-            ORDER BY date
-            """,
-            (start_date, end_date),
-        ).fetchall()
-    finally:
-        conn.close()
-
-    if not rows:
-        return "No Kiwisaver data in the given date range."
-
-    adjustments_sum = sum(a[1] for a in adjustments) if adjustments else 0.0
-
-    first = rows[0]
-    last = rows[-1]
-    start_balance = first[1]
-    end_balance = last[1]
-
-    use_unit_price = first[3] is not None and last[3] is not None
-
-    if use_unit_price:
-        start_val = first[3]
-        end_val = last[3]
-        basis = "unit price"
-    else:
-        start_val = start_balance
-        end_val = end_balance - adjustments_sum
-        basis = "balance (adjusted for contributions)"
-
-    if start_val == 0:
-        pct_change = 0.0
-    else:
-        pct_change = ((end_val - start_val) / start_val) * 100
-
-    # Daily changes for best/worst day, plus stale-day detection (unchanged balance).
-    daily_changes = []
-    stale_days = []
-    prev = None
-    for date, balance, units, unit_price in rows:
-        if prev is not None:
-            prev_date, prev_balance, prev_units, prev_unit_price = prev
-            if use_unit_price:
-                if prev_unit_price is not None and unit_price is not None:
-                    pct = ((unit_price - prev_unit_price) / prev_unit_price) * 100
-                    daily_changes.append((date, pct))
-            else:
-                if prev_balance != 0:
-                    pct = ((balance - prev_balance) / prev_balance) * 100
-                    daily_changes.append((date, pct))
-            if balance == prev_balance:
-                stale_days.append(date)
-        prev = (date, balance, units, unit_price)
-
-    best_day = max(daily_changes, key=lambda x: x[1]) if daily_changes else None
-    worst_day = min(daily_changes, key=lambda x: x[1]) if daily_changes else None
-
-    # Max drawdown: peak-to-trough decline.
-    peak = None
-    max_drawdown = 0.0
-    max_drawdown_date = None
-    for date, balance, units, unit_price in rows:
-        val = unit_price if use_unit_price else balance
-        if val is None:
-            continue
-        if peak is None or val > peak:
-            peak = val
-        drawdown = ((peak - val) / peak) * 100 if peak else 0.0
-        if drawdown > max_drawdown:
-            max_drawdown = drawdown
-            max_drawdown_date = date
-
-    num_days = len(rows)
+    series_list, meta = _build_kiwisaver_series(start_date, end_date)
+    if series_list is None:
+        # meta is the error string
+        return meta
 
     lines = [
         f"Kiwisaver performance from {start_date} to {end_date}:",
-        f"Basis: {basis}",
-        f"Start value: {start_val:,.2f}",
-        f"End value: {end_val:,.2f}",
-        f"Change: {pct_change:+.2f}%",
-        f"Days: {num_days}",
+        f"Basis: {meta['basis']}",
+        f"Start value: {meta['start_value']:,.2f}",
+        f"End value: {meta['end_value']:,.2f}",
+        f"Change: {meta['pct_change']:+.2f}%",
+        f"Days: {meta['num_days']}",
     ]
-    if best_day:
-        lines.append(f"Best day: {best_day[0]} ({best_day[1]:+.2f}%)")
-    if worst_day:
-        lines.append(f"Worst day: {worst_day[0]} ({worst_day[1]:+.2f}%)")
-    if max_drawdown_date is not None:
-        lines.append(f"Max drawdown: {max_drawdown:.2f}% (around {max_drawdown_date})")
-    if stale_days:
-        lines.append(f"Stale days (unchanged balance): {', '.join(stale_days)}")
-    if not use_unit_price:
+    if meta["best_day"]:
+        lines.append(f"Best day: {meta['best_day'][0]} ({meta['best_day'][1]:+.2f}%)")
+    if meta["worst_day"]:
+        lines.append(f"Worst day: {meta['worst_day'][0]} ({meta['worst_day'][1]:+.2f}%)")
+    if meta["max_drawdown_date"] is not None:
+        lines.append(
+            f"Max drawdown: {meta['max_drawdown']:.2f}% (around {meta['max_drawdown_date']})"
+        )
+    if meta["stale_days"]:
+        lines.append(
+            f"Stale days (unchanged balance): {', '.join(meta['stale_days'])}"
+        )
+    if meta["skipped_rows"]:
+        lines.append(
+            f"Warning: skipped rows with missing unit price: {', '.join(meta['skipped_rows'])}"
+        )
+    if not meta["use_unit_price"]:
         lines.append(
             "Note: Result is an estimate based on balance; unit price not available on both ends."
         )
