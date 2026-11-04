@@ -3,7 +3,10 @@
 import importlib
 import os
 import sqlite3
+import subprocess
+import sys
 from datetime import datetime
+from decimal import Decimal
 from unittest import mock
 
 import pytest
@@ -1045,6 +1048,188 @@ def test_kiwisaver_stale_day_with_adjustment_still_flagged(agent):
 
     result = agent.kiwisaver_performance("2026-10-15", "2026-10-16")
     assert "Stale days (unchanged balance): 2026-10-16" in result
+
+
+def test_backfill_dry_run_writes_nothing(tmp_path, monkeypatch):
+    """--dry-run (default) prints planned changes but writes nothing to the DB."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    csv_path = tmp_path / "kiwisaver.csv"
+    csv_path.write_text(
+        "Date,KIWI Saver\n"
+        '"Thursday, 15 October 2026","10,000.00"\n'
+        '"Friday, 16 October 2026","10,100.00"\n',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, "backfill_implied_unit_price.py", str(csv_path)],
+        capture_output=True, text=True, cwd="C:\\expense_AI_agent",
+    )
+    assert result.returncode == 0
+    assert "dry-run" in result.stdout.lower() or "would" in result.stdout.lower()
+    # DB unchanged: no rows inserted
+    conn = sqlite3.connect(str(db_path))
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM kiwisaver_daily").fetchone()[0]
+    finally:
+        conn.close()
+    assert count == 0
+
+
+def test_backfill_apply_idempotent(tmp_path, monkeypatch):
+    """Running --apply twice gives the same result."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    csv_path = tmp_path / "kiwisaver.csv"
+    csv_path.write_text(
+        "Date,KIWI Saver\n"
+        '"Thursday, 15 October 2026","10,000.00"\n'
+        '"Friday, 16 October 2026","10,100.00"\n',
+        encoding="utf-8",
+    )
+
+    # Apply twice
+    for _ in range(2):
+        result = subprocess.run(
+            [sys.executable, "backfill_implied_unit_price.py", "--apply", str(csv_path)],
+            capture_output=True, text=True, cwd="C:\\expense_AI_agent",
+        )
+        assert result.returncode == 0
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute(
+            "SELECT date, unit_price, units, price_source "
+            "FROM kiwisaver_daily ORDER BY date"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert len(rows) == 2
+    # Second run should not duplicate rows
+    for date, up, units, src in rows:
+        assert src == "implied"
+        assert abs(units - 6952.3989) < 0.0001
+
+
+def test_backfill_never_overwrites_actual(tmp_path, monkeypatch):
+    """A row with price_source='actual' is never overwritten."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    # Pre-seed a row with an actual unit price
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "INSERT INTO kiwisaver_daily (date, balance, unit_price, units, price_source) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("2026-10-15", 10000.00, 10.50, 100.0, "actual"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    csv_path = tmp_path / "kiwisaver.csv"
+    csv_path.write_text(
+        "Date,KIWI Saver\n"
+        '"Thursday, 15 October 2026","10,000.00"\n',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, "backfill_implied_unit_price.py", "--apply", str(csv_path)],
+        capture_output=True, text=True, cwd="C:\\expense_AI_agent",
+    )
+    assert result.returncode == 0
+    assert "skip" in result.stdout.lower()
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT unit_price, price_source FROM kiwisaver_daily WHERE date = ?",
+            ("2026-10-15",),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == 10.50  # unchanged
+    assert row[1] == "actual"
+
+
+def test_backfill_implied_price_rounded_4_decimals(tmp_path, monkeypatch):
+    """implied_unit_price = balance / assumed_units, rounded to 4 decimals using Decimal."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    csv_path = tmp_path / "kiwisaver.csv"
+    csv_path.write_text(
+        "Date,KIWI Saver\n"
+        '"Thursday, 15 October 2026","10,000.00"\n',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, "backfill_implied_unit_price.py",
+         "--assumed-units", "6952.3989", "--apply", str(csv_path)],
+        capture_output=True, text=True, cwd="C:\\expense_AI_agent",
+    )
+    assert result.returncode == 0
+
+    # 10000.00 / 6952.3989 = 1.438348... -> 1.4383 (rounded to 4 decimals)
+    expected_price = Decimal("10000.00") / Decimal("6952.3989")
+    expected_price = expected_price.quantize(Decimal("0.0001"))
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT unit_price FROM kiwisaver_daily WHERE date = ?",
+            ("2026-10-15",),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert Decimal(str(row[0])) == expected_price
+
+
+def test_backfill_bad_csv_rows_reported(tmp_path, monkeypatch):
+    """Bad CSV rows are reported in output, not silently dropped."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    csv_path = tmp_path / "kiwisaver.csv"
+    csv_path.write_text(
+        "Date,KIWI Saver\n"
+        '"Not a Date","10,000.00"\n'
+        '"Friday, 16 October 2026","not-a-number"\n'
+        '"Saturday, 17 October 2026","10,100.00"\n',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, "backfill_implied_unit_price.py", "--apply", str(csv_path)],
+        capture_output=True, text=True, cwd="C:\\expense_AI_agent",
+    )
+    assert result.returncode == 0
+    # Bad rows reported in output
+    assert "Bad CSV rows" in result.stdout or "unparseable" in result.stdout.lower()
+    # Only the valid row inserted
+    conn = sqlite3.connect(str(db_path))
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM kiwisaver_daily").fetchone()[0]
+    finally:
+        conn.close()
+    assert count == 1
 
 
 def test_list_expenses_returns_all(agent):

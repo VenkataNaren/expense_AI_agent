@@ -91,7 +91,7 @@ def init_db():
         # Safe migration: add any missing columns to the KiwiSaver tables if an
         # older version of the table already exists.
         for table, expected in (
-            ("kiwisaver_daily", {"date": "TEXT", "balance": "REAL NOT NULL", "units": "REAL", "unit_price": "REAL"}),
+            ("kiwisaver_daily", {"date": "TEXT", "balance": "REAL NOT NULL", "units": "REAL", "unit_price": "REAL", "price_source": "TEXT"}),
             ("kiwisaver_adjustments", {"date": "TEXT", "amount": "REAL", "type": "TEXT"}),
         ):
             existing = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
@@ -653,7 +653,7 @@ def _build_kiwisaver_series(start_date=None, end_date=None):
     try:
         rows = conn.execute(
             f"""
-            SELECT date, balance, units, unit_price
+            SELECT date, balance, units, unit_price, price_source
             FROM kiwisaver_daily
             {where}
             ORDER BY date
@@ -686,7 +686,7 @@ def _build_kiwisaver_series(start_date=None, end_date=None):
     cumulative_adj = 0.0
     adj_index = 0
     adj_cumulative_by_date = {}
-    for date, _balance, _units, _unit_price in rows:
+    for date, _balance, _units, _unit_price, _price_source in rows:
         while adj_index < len(sorted_adj_dates) and sorted_adj_dates[adj_index] <= date:
             cumulative_adj += adj_by_date[sorted_adj_dates[adj_index]]
             adj_index += 1
@@ -706,8 +706,11 @@ def _build_kiwisaver_series(start_date=None, end_date=None):
     peak = None
     max_drawdown = 0.0
     max_drawdown_date = None
+    any_implied = False
 
-    for date, balance, units, unit_price in rows:
+    for date, balance, units, unit_price, price_source in rows:
+        if price_source == "implied":
+            any_implied = True
         if use_unit_price:
             basis_value = unit_price
             if unit_price is None:
@@ -794,6 +797,7 @@ def _build_kiwisaver_series(start_date=None, end_date=None):
         "skipped_rows": skipped_rows,
         "basis": basis_str,
         "use_unit_price": use_unit_price,
+        "any_implied": any_implied,
     }
 
     return series, metadata
@@ -819,6 +823,9 @@ def list_kiwisaver(start_date=None, end_date=None):
         lines.append(
             f"Warning: skipped rows with missing unit price: {', '.join(meta['skipped_rows'])}"
         )
+
+    if meta["any_implied"]:
+        lines.append("Note: unit prices are estimated from balance and assumed units.")
 
     return "\n".join(lines)
 
@@ -862,6 +869,10 @@ def kiwisaver_performance(start_date, end_date):
     if not meta["use_unit_price"]:
         lines.append(
             "Note: Result is an estimate based on balance; unit price not available on both ends."
+        )
+    if meta["any_implied"]:
+        lines.append(
+            "Note: unit prices are estimated from balance and assumed units."
         )
 
     return "\n".join(lines)
