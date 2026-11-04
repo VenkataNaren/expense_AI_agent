@@ -8,7 +8,7 @@ import streamlit as st
 
 # ---------- Helpers (no streamlit calls at module level so tests can import) ----------
 
-from expense_agent import format_time_12h
+from expense_agent import format_time_12h, kiwisaver_performance
 
 
 def _connect():
@@ -56,6 +56,52 @@ def category_totals():
     return totals
 
 
+def load_kiwisaver_for_chart():
+    """Load kiwisaver daily balances ordered by date for the line chart."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT date, balance FROM kiwisaver_daily ORDER BY date"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [{"date": r[0], "balance": r[1]} for r in rows]
+
+
+def load_kiwisaver_recent(limit=10):
+    """Load the most recent kiwisaver daily entries for the table."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT date, balance, units, unit_price FROM kiwisaver_daily "
+            "ORDER BY date DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "Date": r[0],
+            "Balance": r[1],
+            "Units": r[2] if r[2] is not None else "",
+            "Unit Price": r[3] if r[3] is not None else "",
+        }
+        for r in rows
+    ]
+
+
+def get_kiwisaver_date_range():
+    """Return (min_date, max_date) from kiwisaver_daily, or (None, None) if empty."""
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT MIN(date), MAX(date) FROM kiwisaver_daily").fetchone()
+    finally:
+        conn.close()
+    if row and row[0] is not None:
+        return row[0], row[1]
+    return None, None
+
+
 def render_tool_calls(tool_calls):
     """Display tool call details inside an expander."""
     if not tool_calls:
@@ -79,7 +125,7 @@ def main():
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    tab_chat, tab_expenses = st.tabs(["Chat", "Expenses"])
+    tab_chat, tab_expenses, tab_kiwisaver = st.tabs(["Chat", "Expenses", "KiwiSaver"])
 
     # ---- Chat tab ----
     with tab_chat:
@@ -129,6 +175,28 @@ def main():
                 st.info("No expenses recorded.")
         except Exception as exc:
             st.error(f"Could not load expenses: {exc}")
+
+    # ---- KiwiSaver tab ----
+    with tab_kiwisaver:
+        st.subheader("KiwiSaver")
+        try:
+            chart_data = load_kiwisaver_for_chart()
+            if chart_data:
+                st.line_chart(chart_data, x="date", y="balance")
+            else:
+                st.info("No Kiwisaver data recorded.")
+
+            start_date, end_date = get_kiwisaver_date_range()
+            if start_date and end_date:
+                summary = kiwisaver_performance(start_date, end_date)
+                st.text(summary)
+
+            recent = load_kiwisaver_recent()
+            if recent:
+                st.subheader("Recent Entries")
+                st.table(recent)
+        except Exception as exc:
+            st.error(f"Could not load Kiwisaver data: {exc}")
 
 
 if __name__ == "__main__":
