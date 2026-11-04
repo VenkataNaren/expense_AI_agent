@@ -633,6 +633,134 @@ def list_kiwisaver(start_date=None, end_date=None):
     return "\n".join(lines)
 
 
+def kiwisaver_performance(start_date, end_date):
+    """Compute Kiwisaver performance between start_date and end_date inclusive.
+
+    If unit_price exists on both ends, bases the return on unit price
+    (ignores contributions). Otherwise uses balance minus adjustments in the
+    period and flags the result as an estimate.
+    """
+    start_date, error = _parse_kiwisaver_date(start_date)
+    if error:
+        return error
+    end_date, error = _parse_kiwisaver_date(end_date)
+    if error:
+        return error
+    if start_date > end_date:
+        return "Error: start_date must be on or before end_date."
+
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            """
+            SELECT date, balance, units, unit_price
+            FROM kiwisaver_daily
+            WHERE date >= ? AND date <= ?
+            ORDER BY date
+            """,
+            (start_date, end_date),
+        ).fetchall()
+        adjustments = conn.execute(
+            """
+            SELECT date, amount, type
+            FROM kiwisaver_adjustments
+            WHERE date >= ? AND date <= ?
+            ORDER BY date
+            """,
+            (start_date, end_date),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return "No Kiwisaver data in the given date range."
+
+    adjustments_sum = sum(a[1] for a in adjustments) if adjustments else 0.0
+
+    first = rows[0]
+    last = rows[-1]
+    start_balance = first[1]
+    end_balance = last[1]
+
+    use_unit_price = first[3] is not None and last[3] is not None
+
+    if use_unit_price:
+        start_val = first[3]
+        end_val = last[3]
+        basis = "unit price"
+    else:
+        start_val = start_balance
+        end_val = end_balance - adjustments_sum
+        basis = "balance (adjusted for contributions)"
+
+    if start_val == 0:
+        pct_change = 0.0
+    else:
+        pct_change = ((end_val - start_val) / start_val) * 100
+
+    # Daily changes for best/worst day, plus stale-day detection (unchanged balance).
+    daily_changes = []
+    stale_days = []
+    prev = None
+    for date, balance, units, unit_price in rows:
+        if prev is not None:
+            prev_date, prev_balance, prev_units, prev_unit_price = prev
+            if use_unit_price:
+                if prev_unit_price is not None and unit_price is not None:
+                    pct = ((unit_price - prev_unit_price) / prev_unit_price) * 100
+                    daily_changes.append((date, pct))
+            else:
+                if prev_balance != 0:
+                    pct = ((balance - prev_balance) / prev_balance) * 100
+                    daily_changes.append((date, pct))
+            if balance == prev_balance:
+                stale_days.append(date)
+        prev = (date, balance, units, unit_price)
+
+    best_day = max(daily_changes, key=lambda x: x[1]) if daily_changes else None
+    worst_day = min(daily_changes, key=lambda x: x[1]) if daily_changes else None
+
+    # Max drawdown: peak-to-trough decline.
+    peak = None
+    max_drawdown = 0.0
+    max_drawdown_date = None
+    for date, balance, units, unit_price in rows:
+        val = unit_price if use_unit_price else balance
+        if val is None:
+            continue
+        if peak is None or val > peak:
+            peak = val
+        drawdown = ((peak - val) / peak) * 100 if peak else 0.0
+        if drawdown > max_drawdown:
+            max_drawdown = drawdown
+            max_drawdown_date = date
+
+    num_days = len(rows)
+
+    lines = [
+        f"Kiwisaver performance from {start_date} to {end_date}:",
+        f"Basis: {basis}",
+        f"Start value: {start_val:,.2f}",
+        f"End value: {end_val:,.2f}",
+        f"Change: {pct_change:+.2f}%",
+        f"Days: {num_days}",
+    ]
+    if best_day:
+        lines.append(f"Best day: {best_day[0]} ({best_day[1]:+.2f}%)")
+    if worst_day:
+        lines.append(f"Worst day: {worst_day[0]} ({worst_day[1]:+.2f}%)")
+    if max_drawdown_date is not None:
+        lines.append(f"Max drawdown: {max_drawdown:.2f}% (around {max_drawdown_date})")
+    if stale_days:
+        lines.append(f"Stale days (unchanged balance): {', '.join(stale_days)}")
+    if not use_unit_price:
+        lines.append(
+            "Note: Result is an estimate based on balance; unit price not available on both ends."
+        )
+
+    return "\n".join(lines)
+
+
 TOOL_FUNCTIONS = {
     "add_expense": add_expense,
     "list_expenses": list_expenses,
@@ -643,6 +771,7 @@ TOOL_FUNCTIONS = {
     "add_kiwisaver_adjustment": add_kiwisaver_adjustment,
     "list_kiwisaver_adjustments": list_kiwisaver_adjustments,
     "list_kiwisaver": list_kiwisaver,
+    "kiwisaver_performance": kiwisaver_performance,
 }
 
 # The "menu" the model sees: name + description + inputs for each tool
@@ -798,6 +927,21 @@ TOOLS = [
                     "end_date": {"type": "string", "description": "End date (YYYY-MM-DD, inclusive)."},
                 },
                 "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "kiwisaver_performance",
+            "description": "Compute Kiwisaver performance between two dates (start/end value, % change, best/worst day, max drawdown, day count, stale days).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {"type": "string", "description": "Start date (YYYY-MM-DD, inclusive)."},
+                    "end_date": {"type": "string", "description": "End date (YYYY-MM-DD, inclusive)."},
+                },
+                "required": ["start_date", "end_date"],
             },
         },
     },

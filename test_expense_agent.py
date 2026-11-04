@@ -697,6 +697,80 @@ def test_list_kiwisaver_invalid_end_date(agent):
     assert result.startswith("Error:")
 
 
+def test_kiwisaver_performance_unit_price_basis(agent):
+    """kiwisaver_performance with unit_price on both ends uses unit price (ignores contributions)."""
+    agent.add_kiwisaver_daily("2026-11-01", 1000.0, 50.0, 20.0)
+    agent.add_kiwisaver_daily("2026-11-02", 1100.0, 50.0, 22.0)  # +10%
+    agent.add_kiwisaver_daily("2026-11-03", 1045.0, 50.0, 20.9)  # -5%
+
+    result = agent.kiwisaver_performance("2026-11-01", "2026-11-03")
+
+    assert "Kiwisaver performance from 2026-11-01 to 2026-11-03:" in result
+    assert "Basis: unit price" in result
+    assert "Start value: 20.00" in result
+    assert "End value: 20.90" in result
+    assert "Change: +4.50%" in result
+    assert "Days: 3" in result
+    assert "Best day: 2026-11-02 (+10.00%)" in result
+    assert "Worst day: 2026-11-03 (-5.00%)" in result
+    assert "Max drawdown: 5.00%" in result
+
+
+def test_kiwisaver_performance_balance_basis_estimate(agent):
+    """kiwisaver_performance without unit_price uses balance minus adjustments (estimate)."""
+    agent.add_kiwisaver_daily("2026-11-01", 1000.0)
+    agent.add_kiwisaver_daily("2026-11-02", 1100.0)
+    agent.add_kiwisaver_adjustment("2026-11-02", 100.0, "employer")
+
+    result = agent.kiwisaver_performance("2026-11-01", "2026-11-02")
+
+    assert "Basis: balance (adjusted for contributions)" in result
+    assert "Start value: 1,000.00" in result
+    assert "End value: 1,000.00" in result  # 1100 - 100 adjustment
+    assert "Change: +0.00%" in result
+    assert "Note: Result is an estimate" in result
+
+
+def test_kiwisaver_performance_stale_days(agent):
+    """kiwisaver_performance flags days where balance is unchanged."""
+    agent.add_kiwisaver_daily("2026-11-01", 1000.0)
+    agent.add_kiwisaver_daily("2026-11-02", 1000.0)  # stale
+    agent.add_kiwisaver_daily("2026-11-03", 1100.0)
+
+    result = agent.kiwisaver_performance("2026-11-01", "2026-11-03")
+    assert "Stale days (unchanged balance): 2026-11-02" in result
+
+
+def test_kiwisaver_performance_single_row(agent):
+    """kiwisaver_performance with a single row shows zero change and no best/worst day."""
+    agent.add_kiwisaver_daily("2026-11-01", 1000.0, 50.0, 20.0)
+
+    result = agent.kiwisaver_performance("2026-11-01", "2026-11-01")
+
+    assert "Start value: 20.00" in result
+    assert "End value: 20.00" in result
+    assert "Change: +0.00%" in result
+    assert "Days: 1" in result
+
+
+def test_kiwisaver_performance_invalid_start_date(agent):
+    """kiwisaver_performance rejects an invalid start_date."""
+    result = agent.kiwisaver_performance("not-a-date", "2026-11-03")
+    assert result.startswith("Error:")
+
+
+def test_kiwisaver_performance_start_after_end(agent):
+    """kiwisaver_performance rejects start_date after end_date."""
+    result = agent.kiwisaver_performance("2026-11-03", "2026-11-01")
+    assert result.startswith("Error:")
+
+
+def test_kiwisaver_performance_no_data(agent):
+    """kiwisaver_performance reports no data when the range is empty."""
+    result = agent.kiwisaver_performance("2026-11-01", "2026-11-03")
+    assert result == "No Kiwisaver data in the given date range."
+
+
 def test_list_expenses_returns_all(agent):
     """list_expenses should return every recorded expense."""
     agent.add_expense("10.50", "Food", "lunch")
