@@ -294,6 +294,7 @@ def delete_expense(id=None, note=None, amount=None, spent_at=None, confirm=None)
     Phase 2: Call with confirm="y" to actually delete the pending matches.
     Call with confirm="n" to cancel.
     """
+    global _PENDING_DELETE
     confirm = (confirm or "").strip().lower()
 
     conditions = []
@@ -339,13 +340,25 @@ def delete_expense(id=None, note=None, amount=None, spent_at=None, confirm=None)
     preview = "\n".join(details)
 
     if confirm in ("y", "yes"):
+        pending = _PENDING_DELETE
+        if pending["criteria"] is not None:
+            # Apply the previewed (stored) criteria, not the current call's args.
+            where = pending["where"]
+            params = pending["params"]
+            rows = pending["rows"]
+            preview = pending["preview"]
+            _PENDING_DELETE = {"criteria": None, "rows": None}
+            # Fall through to the delete block below
+        # No pending preview: fall through to delete with current args below
+
+    # Delete block — runs for both stored criteria and immediate deletion
+    if confirm in ("y", "yes"):
         conn = _connect()
         try:
             conn.execute(f"DELETE FROM expenses WHERE {where}", params)
             conn.commit()
         finally:
             conn.close()
-        _PENDING_DELETE = {"criteria": None, "rows": None}
         return f"Deleted {len(rows)} record(s):\n{preview}"
 
     if confirm in ("n", "no"):
@@ -353,7 +366,13 @@ def delete_expense(id=None, note=None, amount=None, spent_at=None, confirm=None)
         return "Deletion cancelled. No changes were made."
 
     # Pending confirmation: store state, do NOT delete.
-    _PENDING_DELETE = {"criteria": (id, note, amount, spent_at), "rows": rows}
+    _PENDING_DELETE = {
+        "criteria": (id, note, amount, spent_at),
+        "rows": rows,
+        "where": where,
+        "params": params,
+        "preview": preview,
+    }
     return (
         f"Found {len(rows)} matching expense(s) to delete:\n{preview}\n\n"
         "Are you sure you want to delete this record? (y/n)"
@@ -398,6 +417,7 @@ def _get_previous_day_balance(date_str):
 
 def add_kiwisaver_daily(date, balance, units=None, unit_price=None, confirm=None):
     """Insert or replace a Kiwisaver daily balance row with validation and confirm guardrail."""
+    global _PENDING_KIWISAVER
     # Validate balance
     try:
         balance = float(balance)
@@ -465,18 +485,33 @@ def add_kiwisaver_daily(date, balance, units=None, unit_price=None, confirm=None
         old_balance = existing[0]
 
         if confirm in ("y", "yes"):
+            pending = _PENDING_KIWISAVER["details"]
+            if pending is None:
+                return (
+                    "Error: No pending kiwisaver overwrite to confirm. "
+                    "Call without confirm first to preview."
+                )
+            # Apply the previewed (stored) values, not the current call's args.
             _PENDING_KIWISAVER = {"details": None}
-            _perform_kiwisaver_add(date_str, balance, units, unit_price)
-            msg = f"Kiwisaver daily balance for {date_str}: {balance} (overwrote {old_balance})."
-            if warnings:
-                msg = " ".join(warnings) + "\n" + msg
+            _perform_kiwisaver_add(
+                pending["date"], pending["balance"], pending["units"], pending["unit_price"]
+            )
+            stored_warnings = pending.get("_warnings", [])
+            warning_text = " ".join(stored_warnings) + "\n" if stored_warnings else ""
+            msg = (
+                f"{warning_text}"
+                f"Kiwisaver daily balance for {pending['date']}: "
+                f"{pending['balance']} (overwrote {pending['old_balance']})."
+            )
             return msg
 
         if confirm in ("n", "no"):
             _PENDING_KIWISAVER = {"details": None}
             return "Kiwisaver daily balance update cancelled. No changes were made."
 
-        # Pending confirmation: store state, do NOT insert
+        # Pending confirmation: store state, do NOT insert.
+        # Capture warnings computed at preview time so confirm can replay them.
+        preview_warnings = list(warnings)
         _PENDING_KIWISAVER = {
             "details": {
                 "date": date_str,
@@ -486,6 +521,7 @@ def add_kiwisaver_daily(date, balance, units=None, unit_price=None, confirm=None
                 "old_balance": old_balance,
                 "old_units": existing[1],
                 "old_unit_price": existing[2],
+                "_warnings": preview_warnings,
             }
         }
         warning_text = " ".join(warnings) + "\n" if warnings else ""

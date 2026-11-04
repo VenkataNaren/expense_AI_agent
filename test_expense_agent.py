@@ -597,6 +597,155 @@ def test_add_kiwisaver_daily_overwrite_cancel(agent, monkeypatch):
     assert row[0] == 1000.0
 
 
+def test_add_kiwisaver_daily_overwrite_with_warnings_and_confirm(agent, monkeypatch):
+    """add_kiwisaver_daily overwrite preview includes warnings, and confirm='y' applies previewed values."""
+    fixed_now = datetime(2026, 11, 5, 12, 0)
+    import expense_agent as ea_mod
+
+    class DummyDT:
+        now = staticmethod(lambda: fixed_now)
+        strptime = staticmethod(datetime.strptime)
+        strftime = staticmethod(datetime.strftime)
+
+    monkeypatch.setattr(ea_mod, "datetime", DummyDT)
+
+    # Day 1 balance 1000, day 2 balance 1000 (stale, 0% change)
+    agent.add_kiwisaver_daily("2026-11-03", 1000.0)
+    agent.add_kiwisaver_daily("2026-11-04", 1000.0)
+
+    # Preview overwrite of day 4 with units*unit_price that differs >1% from balance
+    result = agent.add_kiwisaver_daily("2026-11-04", 1000.0, units=100.0, unit_price=12.0)
+    assert "Are you sure you want to overwrite? (y/n)" in result
+    assert "Warning" in result
+    assert "more than 1%" in result
+
+    # Nothing changed yet
+    import sqlite3
+
+    conn = sqlite3.connect(agent.DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT balance, units, unit_price FROM kiwisaver_daily WHERE date = ?",
+            ("2026-11-04",),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == 1000.0  # balance still 1000
+
+    # Confirm applies previewed values (1000, 100, 12) and includes warning
+    result = agent.add_kiwisaver_daily("2026-11-04", 1000.0, units=100.0, unit_price=12.0, confirm="y")
+    assert "Warning" in result
+    assert "more than 1%" in result
+    assert "overwrote 1000.0" in result
+
+    conn = sqlite3.connect(agent.DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT balance, units, unit_price FROM kiwisaver_daily WHERE date = ?",
+            ("2026-11-04",),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == 1000.0
+    assert row[1] == 100.0
+    assert row[2] == 12.0
+
+
+def test_add_kiwisaver_daily_confirm_ignores_changed_args(agent, monkeypatch):
+    """add_kiwisaver_daily confirm='y' must apply previewed args, not changed args."""
+    fixed_now = datetime(2026, 11, 5, 12, 0)
+    import expense_agent as ea_mod
+
+    class DummyDT:
+        now = staticmethod(lambda: fixed_now)
+        strptime = staticmethod(datetime.strptime)
+        strftime = staticmethod(datetime.strftime)
+
+    monkeypatch.setattr(ea_mod, "datetime", DummyDT)
+
+    agent.add_kiwisaver_daily("2026-11-03", 1000.0)
+
+    # Preview: change balance to 1500
+    agent.add_kiwisaver_daily("2026-11-03", 1500.0)
+
+    # Confirm with a DIFFERENT balance (2000) — should still apply 1500 from preview
+    result = agent.add_kiwisaver_daily("2026-11-03", 2000.0, confirm="y")
+    assert "overwrote 1000.0" in result
+    assert "1500.0" in result
+
+    import sqlite3
+
+    conn = sqlite3.connect(agent.DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT balance FROM kiwisaver_daily WHERE date = ?", ("2026-11-03",)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == 1500.0  # previewed value applied, not 2000
+
+
+def test_add_kiwisaver_daily_confirm_without_pending(agent, monkeypatch):
+    """add_kiwisaver_daily confirm='y' with no prior preview returns an error."""
+    fixed_now = datetime(2026, 11, 5, 12, 0)
+    import expense_agent as ea_mod
+
+    class DummyDT:
+        now = staticmethod(lambda: fixed_now)
+        strptime = staticmethod(datetime.strptime)
+        strftime = staticmethod(datetime.strftime)
+
+    monkeypatch.setattr(ea_mod, "datetime", DummyDT)
+
+    agent.add_kiwisaver_daily("2026-11-03", 1000.0)
+
+    # Confirm without any pending preview
+    result = agent.add_kiwisaver_daily("2026-11-03", 2000.0, confirm="y")
+    assert result.startswith("Error:")
+    assert "pending" in result.lower()
+
+
+def test_delete_expense_confirm_uses_stored_criteria(agent):
+    """delete_expense confirm='y' must apply previewed criteria, not changed args."""
+    agent.add_expense("10.50", "Food", "lunch", "2026-11-03 14:30")
+    agent.add_expense(5.00, "Food", "dinner", "2026-11-03 19:00")
+
+    # Preview: delete note="lunch"
+    result = agent.delete_expense(note="lunch")
+    assert "Are you sure you want to delete this record? (y/n)" in result
+
+    # Confirm with a DIFFERENT note — should still delete the previewed "lunch" row
+    result = agent.delete_expense(note="dinner", confirm="y")
+    assert "Deleted 1 record(s)" in result
+
+    import sqlite3
+
+    conn = sqlite3.connect(agent.DB_PATH)
+    try:
+        rows = conn.execute("SELECT note FROM expenses ORDER BY id").fetchall()
+    finally:
+        conn.close()
+    assert rows == [("dinner",)]  # "lunch" was deleted, "dinner" remains
+
+
+def test_delete_expense_confirm_without_pending(agent):
+    """delete_expense confirm='y' without prior preview still deletes immediately (backward compatible)."""
+    agent.add_expense("10.50", "Food", "lunch", "2026-11-03 14:30")
+
+    # Confirm without any prior preview — should delete immediately
+    result = agent.delete_expense(note="lunch", confirm="y")
+    assert "Deleted 1 record(s)" in result
+
+    import sqlite3
+
+    conn = sqlite3.connect(agent.DB_PATH)
+    try:
+        rows = conn.execute("SELECT COUNT(*) FROM expenses").fetchone()
+    finally:
+        conn.close()
+    assert rows[0] == 0
+
+
 def test_add_kiwisaver_daily_warns_5pct_change(agent, monkeypatch):
     """add_kiwisaver_daily should warn when balance changes >5% from previous day."""
     fixed_now = datetime(2026, 11, 5, 12, 0)
