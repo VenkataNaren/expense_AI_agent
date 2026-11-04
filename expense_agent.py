@@ -582,6 +582,57 @@ def list_kiwisaver_adjustments():
     return "\n".join(lines)
 
 
+def list_kiwisaver(start_date=None, end_date=None):
+    """List KiwiSaver daily balances in date order with daily % change."""
+    # Validate date filters if provided
+    if start_date is not None:
+        start_date, error = _parse_kiwisaver_date(start_date)
+        if error:
+            return error
+    if end_date is not None:
+        end_date, error = _parse_kiwisaver_date(end_date)
+        if error:
+            return error
+
+    conditions = []
+    params = []
+    if start_date is not None:
+        conditions.append("date >= ?")
+        params.append(start_date)
+    if end_date is not None:
+        conditions.append("date <= ?")
+        params.append(end_date)
+
+    where = " AND ".join(conditions)
+    if where:
+        where = "WHERE " + where
+
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            f"SELECT date, balance FROM kiwisaver_daily {where} ORDER BY date",
+            params,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return "No Kiwisaver daily balances recorded."
+
+    lines = []
+    prev_balance = None
+    for date, balance in rows:
+        if prev_balance is not None and prev_balance != 0:
+            pct = ((balance - prev_balance) / prev_balance) * 100
+            change = f"{pct:+.2f}%"
+        else:
+            change = "N/A"
+        lines.append(f"{date} - balance {balance} - change {change}")
+        prev_balance = balance
+
+    return "\n".join(lines)
+
+
 TOOL_FUNCTIONS = {
     "add_expense": add_expense,
     "list_expenses": list_expenses,
@@ -591,6 +642,7 @@ TOOL_FUNCTIONS = {
     "list_kiwisaver_daily": list_kiwisaver_daily,
     "add_kiwisaver_adjustment": add_kiwisaver_adjustment,
     "list_kiwisaver_adjustments": list_kiwisaver_adjustments,
+    "list_kiwisaver": list_kiwisaver,
 }
 
 # The "menu" the model sees: name + description + inputs for each tool
@@ -732,6 +784,21 @@ TOOLS = [
             "name": "list_kiwisaver_adjustments",
             "description": "List all KiwiSaver adjustment rows.",
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_kiwisaver",
+            "description": "List KiwiSaver daily balances in date order with daily % change. Optionally filter by start_date and/or end_date (YYYY-MM-DD).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {"type": "string", "description": "Start date (YYYY-MM-DD, inclusive)."},
+                    "end_date": {"type": "string", "description": "End date (YYYY-MM-DD, inclusive)."},
+                },
+                "required": [],
+            },
         },
     },
 ]

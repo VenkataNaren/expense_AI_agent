@@ -627,6 +627,76 @@ def test_list_kiwisaver_adjustments_empty(agent):
     assert agent.list_kiwisaver_adjustments() == "No Kiwisaver adjustments recorded."
 
 
+def test_list_kiwisaver_empty(agent):
+    """list_kiwisaver should report no rows when empty."""
+    assert agent.list_kiwisaver() == "No Kiwisaver daily balances recorded."
+
+
+def test_list_kiwisaver_single_row_na(agent):
+    """list_kiwisaver should show N/A change for the first row."""
+    agent.add_kiwisaver_daily("2026-11-03", 1000.0)
+    result = agent.list_kiwisaver()
+    assert "2026-11-03 - balance 1000.0 - change N/A" in result
+
+
+def test_list_kiwisaver_multiple_rows_pct_change(agent):
+    """list_kiwisaver should compute daily % change between consecutive rows."""
+    agent.add_kiwisaver_daily("2026-11-01", 1000.0)
+    agent.add_kiwisaver_daily("2026-11-02", 1100.0)  # +10%
+    agent.add_kiwisaver_daily("2026-11-03", 1050.0)  # -4.55% (approx)
+    result = agent.list_kiwisaver()
+    assert "2026-11-01 - balance 1000.0 - change N/A" in result
+    assert "2026-11-02 - balance 1100.0 - change +10.00%" in result
+    assert "-4.55%" in result
+
+
+def test_list_kiwisaver_start_date_filter(agent):
+    """list_kiwisaver with start_date should exclude earlier rows."""
+    agent.add_kiwisaver_daily("2026-11-01", 1000.0)
+    agent.add_kiwisaver_daily("2026-11-02", 1100.0)
+    agent.add_kiwisaver_daily("2026-11-03", 1200.0)
+    result = agent.list_kiwisaver(start_date="2026-11-02")
+    assert "2026-11-01" not in result
+    assert "2026-11-02" in result
+    assert "2026-11-03" in result
+
+
+def test_list_kiwisaver_end_date_filter(agent):
+    """list_kiwisaver with end_date should exclude later rows."""
+    agent.add_kiwisaver_daily("2026-11-01", 1000.0)
+    agent.add_kiwisaver_daily("2026-11-02", 1100.0)
+    agent.add_kiwisaver_daily("2026-11-03", 1200.0)
+    result = agent.list_kiwisaver(end_date="2026-11-02")
+    assert "2026-11-01" in result
+    assert "2026-11-02" in result
+    assert "2026-11-03" not in result
+
+
+def test_list_kiwisaver_both_filters(agent):
+    """list_kiwisaver with both start_date and end_date should return rows in range."""
+    agent.add_kiwisaver_daily("2026-11-01", 1000.0)
+    agent.add_kiwisaver_daily("2026-11-02", 1100.0)
+    agent.add_kiwisaver_daily("2026-11-03", 1200.0)
+    agent.add_kiwisaver_daily("2026-11-04", 1300.0)
+    result = agent.list_kiwisaver(start_date="2026-11-02", end_date="2026-11-03")
+    assert "2026-11-01" not in result
+    assert "2026-11-02" in result
+    assert "2026-11-03" in result
+    assert "2026-11-04" not in result
+
+
+def test_list_kiwisaver_invalid_start_date(agent):
+    """list_kiwisaver should reject an invalid start_date format."""
+    result = agent.list_kiwisaver(start_date="not-a-date")
+    assert result.startswith("Error:")
+
+
+def test_list_kiwisaver_invalid_end_date(agent):
+    """list_kiwisaver should reject an invalid end_date format."""
+    result = agent.list_kiwisaver(end_date="2026-13-01")
+    assert result.startswith("Error:")
+
+
 def test_list_expenses_returns_all(agent):
     """list_expenses should return every recorded expense."""
     agent.add_expense("10.50", "Food", "lunch")
