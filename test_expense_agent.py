@@ -968,6 +968,44 @@ def test_list_kiwisaver_unit_price_basis_with_gap(agent):
     assert "Warning" in result or "skip" in result.lower()
 
 
+def test_kiwisaver_performance_realistic_no_adjustments(agent):
+    """Realistic 22-day Kiwisaver balance series with no adjustments."""
+    dates = [
+        "2026-10-15", "2026-10-16", "2026-10-17", "2026-10-18", "2026-10-19",
+        "2026-10-20", "2026-10-21", "2026-10-22", "2026-10-23", "2026-10-24",
+        "2026-10-25", "2026-10-26", "2026-10-27", "2026-10-28", "2026-10-29",
+        "2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02", "2026-11-03",
+        "2026-11-04", "2026-11-05",
+    ]
+    balances = [
+        10000.00, 10000.00, 9969.24, 9952.61, 10146.39,
+        10130.53, 10115.32, 10115.32, 10115.32, 10115.32,
+        10115.32, 10115.32, 10175.46, 10103.16, 10061.15,
+        10119.52, 10119.52, 10119.52, 10182.75, 10182.75,
+        10090.14, 10062.89,
+    ]
+    for d, b in zip(dates, balances):
+        agent.add_kiwisaver_daily(d, b)
+
+    # kiwisaver_performance over the full range
+    result = agent.kiwisaver_performance("2026-10-15", "2026-11-05")
+    assert "Days: 22" in result
+    assert "Start value: 10,000.00" in result
+    assert "End value: 10,062.89" in result
+    assert "Change: +0.63%" in result
+    assert "Best day: 2026-10-19 (+1.95%)" in result
+    assert "Worst day: 2026-11-04 (-0.91%)" in result
+    assert "Max drawdown: 1.18%" in result
+    assert "Stale days (unchanged balance): 2026-10-16, 2026-10-22, 2026-10-23, 2026-10-24, 2026-10-25, 2026-10-26, 2026-10-31, 2026-11-01, 2026-11-03" in result
+
+    # list_kiwisaver over the same range must agree
+    list_result = agent.list_kiwisaver("2026-10-15", "2026-11-05")
+    assert "Change: +0.63%" not in list_result  # list_kiwisaver doesn't print summary
+    # Both show the same daily % changes
+    assert "+1.95%" in list_result
+    assert "-0.91%" in list_result
+
+
 def test_list_expenses_returns_all(agent):
     """list_expenses should return every recorded expense."""
     agent.add_expense("10.50", "Food", "lunch")
