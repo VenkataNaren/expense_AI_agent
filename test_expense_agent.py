@@ -988,3 +988,58 @@ def test_category_totals(tmp_path, monkeypatch):
     import app
     totals = app.category_totals()
     assert totals == {"food": 30.0, "transport": 5.0}
+
+
+def test_agent_kiwisaver_performance_via_mocked_model(tmp_path, monkeypatch):
+    """'how is my KiwiSaver doing since 15 Oct?' triggers kiwisaver_performance tool."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, mock_openai = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+        },
+        db_path=db_path,
+    )
+
+    # Add some Kiwisaver data for the tool to read
+    expense_agent.add_kiwisaver_daily("2026-10-15", 1000.0, 50.0, 20.0)
+    expense_agent.add_kiwisaver_daily("2026-10-16", 1100.0, 50.0, 22.0)
+
+    # Mock model: first response requests a tool call, second returns text
+    mock_client = mock_openai.return_value
+
+    tool_call = mock.Mock()
+    tool_call.id = "call_123"
+    tool_call.function.name = "kiwisaver_performance"
+    tool_call.function.arguments = '{"start_date": "2026-10-15", "end_date": "2026-10-16"}'
+
+    first_response = mock.Mock()
+    first_response.choices = [mock.Mock()]
+    first_response.choices[0].message = mock.Mock()
+    first_response.choices[0].message.tool_calls = [tool_call]
+    first_response.choices[0].message.content = None
+
+    second_response = mock.Mock()
+    second_response.choices = [mock.Mock()]
+    second_response.choices[0].message = mock.Mock()
+    second_response.choices[0].message.tool_calls = []
+    second_response.choices[0].message.content = (
+        "Your KiwiSaver is up 10%. (For tracking purposes only, not financial advice.)"
+    )
+
+    mock_client.chat.completions.create.side_effect = [first_response, second_response]
+
+    history = [{"role": "system", "content": expense_agent.SYSTEM_PROMPT}]
+    reply, tool_calls = expense_agent.run_agent(
+        "how is my KiwiSaver doing since 15 Oct?", history
+    )
+
+    # Verify kiwisaver_performance was triggered
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["name"] == "kiwisaver_performance"
+    assert tool_calls[0]["args"]["start_date"] == "2026-10-15"
+    assert tool_calls[0]["args"]["end_date"] == "2026-10-16"
+
+    # Verify the model's final answer and the not-financial-advice disclaimer
+    assert "up 10%" in reply
+    assert "not financial advice" in reply.lower()

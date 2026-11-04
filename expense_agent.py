@@ -967,7 +967,13 @@ SYSTEM_PROMPT = (
     "If add_expense is called with a future-dated timestamp, the tool will preview the "
     "expense and ask: 'Are you sure you want to add this record? (y/n)'. Wait for the "
     "user's reply: if they say 'y'/'yes', call add_expense again with confirm='y' to "
-    "actually record it; if they say 'n'/'no', call add_expense with confirm='n' to cancel."
+    "actually record it; if they say 'n'/'no', call add_expense with confirm='n' to cancel. "
+    "If the user asks about KiwiSaver (balance, daily values, adjustments, or performance), "
+    "use the kiwisaver tools: list_kiwisaver, kiwisaver_performance, add_kiwisaver_daily, "
+    "list_kiwisaver_daily, add_kiwisaver_adjustment, list_kiwisaver_adjustments. "
+    "Never estimate KiwiSaver numbers yourself; always call the appropriate tool with exact "
+    "dates (YYYY-MM-DD). When reporting KiwiSaver results, state clearly that the figures are "
+    "for tracking purposes only and are not financial advice."
 )
 
 # ---------- 4. The agent loop ----------
