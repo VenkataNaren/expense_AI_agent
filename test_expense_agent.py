@@ -432,6 +432,37 @@ def test_add_kiwisaver_adjustment_invalid_type(agent):
     assert rows[0] == 0
 
 
+def test_add_kiwisaver_adjustment_rejects_zero_amount(agent):
+    """add_kiwisaver_adjustment should reject amount = 0."""
+    result = agent.add_kiwisaver_adjustment("2026-11-03", 0, "employee")
+    assert result.startswith("Error:")
+
+
+def test_add_kiwisaver_adjustment_allows_negative_amount(agent):
+    """add_kiwisaver_adjustment should allow negative amounts."""
+    result = agent.add_kiwisaver_adjustment("2026-11-03", -50.0, "fee")
+    assert "fee" in result
+    assert "-50.0" in result
+
+
+def test_add_kiwisaver_adjustment_records_valid(agent):
+    """add_kiwisaver_adjustment should record valid adjustments for all allowed types."""
+    for t in ("employee", "employer", "government", "tax", "fee"):
+        result = agent.add_kiwisaver_adjustment("2026-11-03", 100.0, t)
+        assert t in result
+
+    import sqlite3
+
+    conn = sqlite3.connect(agent.DB_PATH)
+    try:
+        rows = conn.execute(
+            "SELECT type FROM kiwisaver_adjustments ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert [r[0] for r in rows] == ["employee", "employer", "government", "tax", "fee"]
+
+
 def test_add_kiwisaver_daily_rejects_zero_balance(agent):
     """add_kiwisaver_daily should reject balance <= 0."""
     result = agent.add_kiwisaver_daily("2026-11-03", 0)

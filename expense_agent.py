@@ -547,6 +547,8 @@ def add_kiwisaver_adjustment(date, amount, type):
         amount = float(amount)
     except (TypeError, ValueError):
         return "Error: amount must be a number."
+    if amount == 0:
+        return "Error: amount must not be zero."
 
     conn = _connect()
     try:
