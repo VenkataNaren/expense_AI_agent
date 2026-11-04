@@ -356,12 +356,17 @@ def test_kiwisaver_daily_unique_date(agent):
 
 
 def test_add_kiwisaver_daily_records_balance(agent):
-    """add_kiwisaver_daily should insert a row and INSERT OR REPLACE on duplicate date."""
+    """add_kiwisaver_daily should insert a row and INSERT OR REPLACE on duplicate date (with confirm)."""
     result = agent.add_kiwisaver_daily("2026-11-03", 1000.0, 50.0, 20.0)
     assert result == "Kiwisaver daily balance for 2026-11-03: 1000.0."
 
-    # Duplicate date replaces the previous row (UNIQUE constraint).
+    # Duplicate date without confirm previews, does not overwrite.
     result = agent.add_kiwisaver_daily("2026-11-03", 1500.0, 75.0, 20.0)
+    assert "Are you sure you want to overwrite? (y/n)" in result
+
+    # Confirm overwrite.
+    result = agent.add_kiwisaver_daily("2026-11-03", 1500.0, 75.0, 20.0, confirm="y")
+    assert "overwrote" in result
     assert "1500.0" in result
 
     import sqlite3
@@ -425,6 +430,165 @@ def test_add_kiwisaver_adjustment_invalid_type(agent):
     finally:
         conn.close()
     assert rows[0] == 0
+
+
+def test_add_kiwisaver_daily_rejects_zero_balance(agent):
+    """add_kiwisaver_daily should reject balance <= 0."""
+    result = agent.add_kiwisaver_daily("2026-11-03", 0)
+    assert result.startswith("Error:")
+
+    result = agent.add_kiwisaver_daily("2026-11-03", -50)
+    assert result.startswith("Error:")
+
+
+def test_add_kiwisaver_daily_rejects_future_date(agent, monkeypatch):
+    """add_kiwisaver_daily should reject future dates."""
+    fixed_now = datetime(2026, 11, 3, 12, 0)
+    import expense_agent as ea_mod
+
+    class DummyDT:
+        now = staticmethod(lambda: fixed_now)
+        strptime = staticmethod(datetime.strptime)
+        strftime = staticmethod(datetime.strftime)
+
+    monkeypatch.setattr(ea_mod, "datetime", DummyDT)
+
+    result = agent.add_kiwisaver_daily("2026-11-04", 1000.0)
+    assert result.startswith("Error:")
+    assert "future" in result.lower()
+
+
+def test_add_kiwisaver_daily_rejects_bad_date_format(agent):
+    """add_kiwisaver_daily should reject bad date formats."""
+    result = agent.add_kiwisaver_daily("not-a-date", 1000.0)
+    assert result.startswith("Error:")
+
+    result = agent.add_kiwisaver_daily("2026-13-01", 1000.0)
+    assert result.startswith("Error:")
+
+
+def test_add_kiwisaver_daily_units_unit_price_warning(agent, monkeypatch):
+    """add_kiwisaver_daily should warn when units*unit_price differs from balance by >1%."""
+    fixed_now = datetime(2026, 11, 3, 12, 0)
+    import expense_agent as ea_mod
+
+    class DummyDT:
+        now = staticmethod(lambda: fixed_now)
+        strptime = staticmethod(datetime.strptime)
+        strftime = staticmethod(datetime.strftime)
+
+    monkeypatch.setattr(ea_mod, "datetime", DummyDT)
+
+    # units * unit_price = 100 * 10 = 1000, balance = 1000, within 1% -> no warning
+    result = agent.add_kiwisaver_daily("2026-11-01", 1000.0, units=100.0, unit_price=10.0)
+    assert "Warning" not in result
+
+    # units * unit_price = 100 * 12 = 1200, balance = 1000, 20% diff -> warning
+    result = agent.add_kiwisaver_daily("2026-11-02", 1000.0, units=100.0, unit_price=12.0)
+    assert "Warning" in result
+    assert "more than 1%" in result
+
+
+def test_add_kiwisaver_daily_overwrite_confirm_flow(agent, monkeypatch):
+    """add_kiwisaver_daily should preview overwrite and require confirmation."""
+    fixed_now = datetime(2026, 11, 5, 12, 0)
+    import expense_agent as ea_mod
+
+    class DummyDT:
+        now = staticmethod(lambda: fixed_now)
+        strptime = staticmethod(datetime.strptime)
+        strftime = staticmethod(datetime.strftime)
+
+    monkeypatch.setattr(ea_mod, "datetime", DummyDT)
+
+    # Insert initial
+    agent.add_kiwisaver_daily("2026-11-03", 1000.0)
+
+    # Phase 1: preview overwrite, no confirm
+    result = agent.add_kiwisaver_daily("2026-11-03", 2000.0)
+    assert "Are you sure you want to overwrite? (y/n)" in result
+    assert "1000.0" in result
+    assert "2000.0" in result
+
+    # Verify nothing changed yet
+    import sqlite3
+
+    conn = sqlite3.connect(agent.DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT balance FROM kiwisaver_daily WHERE date = ?", ("2026-11-03",)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == 1000.0
+
+    # Phase 2: confirm overwrite
+    result = agent.add_kiwisaver_daily("2026-11-03", 2000.0, confirm="y")
+    assert "overwrote" in result
+    assert "2000.0" in result
+
+    conn = sqlite3.connect(agent.DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT balance FROM kiwisaver_daily WHERE date = ?", ("2026-11-03",)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == 2000.0
+
+
+def test_add_kiwisaver_daily_overwrite_cancel(agent, monkeypatch):
+    """add_kiwisaver_daily should cancel overwrite on confirm='n'."""
+    fixed_now = datetime(2026, 11, 5, 12, 0)
+    import expense_agent as ea_mod
+
+    class DummyDT:
+        now = staticmethod(lambda: fixed_now)
+        strptime = staticmethod(datetime.strptime)
+        strftime = staticmethod(datetime.strftime)
+
+    monkeypatch.setattr(ea_mod, "datetime", DummyDT)
+
+    agent.add_kiwisaver_daily("2026-11-03", 1000.0)
+    agent.add_kiwisaver_daily("2026-11-03", 2000.0)  # preview
+    result = agent.add_kiwisaver_daily("2026-11-03", 2000.0, confirm="n")
+    assert result == "Kiwisaver daily balance update cancelled. No changes were made."
+
+    import sqlite3
+
+    conn = sqlite3.connect(agent.DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT balance FROM kiwisaver_daily WHERE date = ?", ("2026-11-03",)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == 1000.0
+
+
+def test_add_kiwisaver_daily_warns_5pct_change(agent, monkeypatch):
+    """add_kiwisaver_daily should warn when balance changes >5% from previous day."""
+    fixed_now = datetime(2026, 11, 5, 12, 0)
+    import expense_agent as ea_mod
+
+    class DummyDT:
+        now = staticmethod(lambda: fixed_now)
+        strptime = staticmethod(datetime.strptime)
+        strftime = staticmethod(datetime.strftime)
+
+    monkeypatch.setattr(ea_mod, "datetime", DummyDT)
+
+    # Insert previous day balance
+    agent.add_kiwisaver_daily("2026-11-03", 1000.0)
+
+    # New day with 10% increase -> warning
+    result = agent.add_kiwisaver_daily("2026-11-04", 1100.0)
+    assert "Warning" in result
+    assert "more than 5%" in result
+
+    # New day with ~4% change -> no warning
+    result = agent.add_kiwisaver_daily("2026-11-05", 1055.0)
+    assert "Warning" not in result
 
 
 def test_list_kiwisaver_adjustments_empty(agent):

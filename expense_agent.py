@@ -281,6 +281,10 @@ _PENDING_DELETE = {"criteria": None, "rows": None}
 # Stores the expense details until the user confirms with "y"/"yes".
 _PENDING_ADD = {"details": None}
 
+# Pending kiwisaver daily overwrite state for the y/n confirmation guardrail.
+# Stores the proposed daily balance details until the user confirms with "y"/"yes".
+_PENDING_KIWISAVER = {"details": None}
+
 
 def delete_expense(id=None, note=None, amount=None, spent_at=None, confirm=None):
     """Delete expense(s) matching all provided criteria, with y/n confirmation guardrail.
@@ -367,12 +371,51 @@ def _validate_kiwisaver_type(value):
     return value, None
 
 
-def add_kiwisaver_daily(date, balance, units=None, unit_price=None):
-    """Insert or replace a KiwiSaver daily balance row (date is UNIQUE)."""
+def _parse_kiwisaver_date(value):
+    """Parse a strict YYYY-MM-DD date and return (date_str, error_string)."""
+    if value is None or value == "":
+        return None, "Error: Date is required."
+    value = value.strip()
+    try:
+        dt = datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return None, "Error: Invalid date format. Use 'YYYY-MM-DD'."
+    return dt.strftime("%Y-%m-%d"), None
+
+
+def _get_previous_day_balance(date_str):
+    """Return the balance for the most recent date before date_str, or None."""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT balance FROM kiwisaver_daily WHERE date < ? ORDER BY date DESC LIMIT 1",
+            (date_str,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else None
+
+
+def add_kiwisaver_daily(date, balance, units=None, unit_price=None, confirm=None):
+    """Insert or replace a Kiwisaver daily balance row with validation and confirm guardrail."""
+    # Validate balance
     try:
         balance = float(balance)
     except (TypeError, ValueError):
         return "Error: balance must be a number."
+    if balance <= 0:
+        return "Error: balance must be greater than 0."
+
+    # Validate date format (strict YYYY-MM-DD)
+    date_str, error = _parse_kiwisaver_date(date)
+    if error:
+        return error
+
+    # Reject future dates
+    if datetime.strptime(date_str, "%Y-%m-%d").date() > datetime.now().date():
+        return "Error: Date is in the future."
+
+    # Validate units and unit_price are numbers
     if units is not None:
         try:
             units = float(units)
@@ -384,6 +427,85 @@ def add_kiwisaver_daily(date, balance, units=None, unit_price=None):
         except (TypeError, ValueError):
             return "Error: unit_price must be a number."
 
+    warnings = []
+
+    # Check units * unit_price within 1% of balance
+    if units is not None and unit_price is not None:
+        implied = units * unit_price
+        if implied != balance:
+            pct_diff = abs(implied - balance) / balance
+            if pct_diff > 0.01:
+                warnings.append(
+                    f"Warning: units * unit_price ({implied:.2f}) differs from balance ({balance:.2f}) by more than 1%."
+                )
+
+    # Check if date already exists
+    conn = _connect()
+    try:
+        existing = conn.execute(
+            "SELECT balance, units, unit_price FROM kiwisaver_daily WHERE date = ?",
+            (date_str,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    # 5% change warning from previous day's balance
+    prev_balance = _get_previous_day_balance(date_str)
+    if prev_balance is not None and prev_balance != 0:
+        pct_change = abs(balance - prev_balance) / prev_balance
+        if pct_change > 0.05:
+            warnings.append(
+                f"Warning: balance changed by more than 5% from previous day "
+                f"({prev_balance:.2f} -> {balance:.2f})."
+            )
+
+    confirm = (confirm or "").strip().lower()
+
+    if existing is not None:
+        old_balance = existing[0]
+
+        if confirm in ("y", "yes"):
+            _PENDING_KIWISAVER = {"details": None}
+            _perform_kiwisaver_add(date_str, balance, units, unit_price)
+            msg = f"Kiwisaver daily balance for {date_str}: {balance} (overwrote {old_balance})."
+            if warnings:
+                msg = " ".join(warnings) + "\n" + msg
+            return msg
+
+        if confirm in ("n", "no"):
+            _PENDING_KIWISAVER = {"details": None}
+            return "Kiwisaver daily balance update cancelled. No changes were made."
+
+        # Pending confirmation: store state, do NOT insert
+        _PENDING_KIWISAVER = {
+            "details": {
+                "date": date_str,
+                "balance": balance,
+                "units": units,
+                "unit_price": unit_price,
+                "old_balance": old_balance,
+                "old_units": existing[1],
+                "old_unit_price": existing[2],
+            }
+        }
+        warning_text = " ".join(warnings) + "\n" if warnings else ""
+        return (
+            f"{warning_text}"
+            f"Found existing Kiwisaver daily balance for {date_str}: {old_balance}.\n"
+            f"New value: {balance}.\n"
+            "Are you sure you want to overwrite? (y/n)"
+        )
+
+    # No existing date: insert
+    _perform_kiwisaver_add(date_str, balance, units, unit_price)
+    msg = f"Kiwisaver daily balance for {date_str}: {balance}."
+    if warnings:
+        msg = " ".join(warnings) + "\n" + msg
+    return msg
+
+
+def _perform_kiwisaver_add(date_str, balance, units, unit_price):
+    """Insert or replace a Kiwisaver daily balance row."""
     conn = _connect()
     try:
         conn.execute(
@@ -391,12 +513,11 @@ def add_kiwisaver_daily(date, balance, units=None, unit_price=None):
             INSERT OR REPLACE INTO kiwisaver_daily (date, balance, units, unit_price)
             VALUES (?, ?, ?, ?)
             """,
-            (date, balance, units, unit_price),
+            (date_str, balance, units, unit_price),
         )
         conn.commit()
     finally:
         conn.close()
-    return f"Kiwisaver daily balance for {date}: {balance}."
 
 
 def list_kiwisaver_daily():
