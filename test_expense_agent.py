@@ -319,6 +319,119 @@ def test_migration_adds_spent_at_column(tmp_path):
         conn.close()
 
 
+def test_kiwisaver_tables_created(agent):
+    """init_db should create the kiwisaver_daily and kiwisaver_adjustments tables."""
+    import sqlite3
+
+    conn = sqlite3.connect(agent.DB_PATH)
+    try:
+        tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    finally:
+        conn.close()
+    assert "kiwisaver_daily" in tables
+    assert "kiwisaver_adjustments" in tables
+
+
+def test_kiwisaver_daily_unique_date(agent):
+    """kiwisaver_daily should reject a duplicate date (UNIQUE constraint)."""
+    import sqlite3
+
+    conn = sqlite3.connect(agent.DB_PATH)
+    try:
+        conn.execute(
+            "INSERT INTO kiwisaver_daily (date, balance) VALUES (?, ?)",
+            ("2026-11-03", 1000.0),
+        )
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO kiwisaver_daily (date, balance) VALUES (?, ?)",
+                ("2026-11-03", 2000.0),
+            )
+    finally:
+        conn.close()
+
+
+def test_add_kiwisaver_daily_records_balance(agent):
+    """add_kiwisaver_daily should insert a row and INSERT OR REPLACE on duplicate date."""
+    result = agent.add_kiwisaver_daily("2026-11-03", 1000.0, 50.0, 20.0)
+    assert result == "Kiwisaver daily balance for 2026-11-03: 1000.0."
+
+    # Duplicate date replaces the previous row (UNIQUE constraint).
+    result = agent.add_kiwisaver_daily("2026-11-03", 1500.0, 75.0, 20.0)
+    assert "1500.0" in result
+
+    import sqlite3
+
+    conn = sqlite3.connect(agent.DB_PATH)
+    try:
+        rows = conn.execute(
+            "SELECT date, balance, units, unit_price FROM kiwisaver_daily ORDER BY date"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    assert rows[0] == ("2026-11-03", 1500.0, 75.0, 20.0)
+
+
+def test_list_kiwisaver_daily_empty(agent):
+    """list_kiwisaver_daily should report no rows when empty."""
+    assert agent.list_kiwisaver_daily() == "No Kiwisaver daily balances recorded."
+
+
+def test_list_kiwisaver_daily_returns_all(agent):
+    """list_kiwisaver_daily should return every recorded row."""
+    agent.add_kiwisaver_daily("2026-11-03", 1000.0)
+    agent.add_kiwisaver_daily("2026-11-04", 1100.0)
+    result = agent.list_kiwisaver_daily()
+    assert "2026-11-03" in result
+    assert "2026-11-04" in result
+    assert "1000.0" in result
+    assert "1100.0" in result
+
+
+def test_add_kiwisaver_adjustment_records(agent):
+    """add_kiwisaver_adjustment should insert a row for a valid type."""
+    result = agent.add_kiwisaver_adjustment("2026-11-03", 100.0, "employer")
+    assert "employer" in result
+    assert "100.0" in result
+
+    import sqlite3
+
+    conn = sqlite3.connect(agent.DB_PATH)
+    try:
+        rows = conn.execute(
+            "SELECT date, amount, type FROM kiwisaver_adjustments ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    assert rows[0] == ("2026-11-03", 100.0, "employer")
+
+
+def test_add_kiwisaver_adjustment_invalid_type(agent):
+    """add_kiwisaver_adjustment should reject an invalid type."""
+    result = agent.add_kiwisaver_adjustment("2026-11-03", 50.0, "bonus")
+    assert result.startswith("Error:")
+
+    import sqlite3
+
+    conn = sqlite3.connect(agent.DB_PATH)
+    try:
+        rows = conn.execute("SELECT COUNT(*) FROM kiwisaver_adjustments").fetchone()
+    finally:
+        conn.close()
+    assert rows[0] == 0
+
+
+def test_list_kiwisaver_adjustments_empty(agent):
+    """list_kiwisaver_adjustments should report no rows when empty."""
+    assert agent.list_kiwisaver_adjustments() == "No Kiwisaver adjustments recorded."
+
+
 def test_list_expenses_returns_all(agent):
     """list_expenses should return every recorded expense."""
     agent.add_expense("10.50", "Food", "lunch")

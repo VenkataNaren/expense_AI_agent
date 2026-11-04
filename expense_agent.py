@@ -38,7 +38,7 @@ def _connect():
 
 
 def init_db():
-    """Create the table and run the safe migration. Called once at import."""
+    """Create the tables and run safe migrations. Called once at import."""
     conn = _connect()
     try:
         conn.execute(
@@ -63,7 +63,43 @@ def init_db():
                 "UPDATE expenses SET spent_at = ? WHERE spent_at IS NULL OR spent_at = ''",
                 (f"{today} 00:00",),
             )
-            conn.commit()
+
+        # KiwiSaver daily balances (one row per date).
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS kiwisaver_daily (
+                date TEXT UNIQUE,
+                balance REAL NOT NULL,
+                units REAL,
+                unit_price REAL
+            )
+            """
+        )
+
+        # KiwiSaver adjustments (employee, employer, government, tax, fee).
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS kiwisaver_adjustments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT,
+                amount REAL,
+                type TEXT
+            )
+            """
+        )
+
+        # Safe migration: add any missing columns to the KiwiSaver tables if an
+        # older version of the table already exists.
+        for table, expected in (
+            ("kiwisaver_daily", {"date": "TEXT", "balance": "REAL NOT NULL", "units": "REAL", "unit_price": "REAL"}),
+            ("kiwisaver_adjustments", {"date": "TEXT", "amount": "REAL", "type": "TEXT"}),
+        ):
+            existing = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+            for col, coltype in expected.items():
+                if col not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")
+
+        conn.commit()
     finally:
         conn.close()
 
@@ -320,11 +356,118 @@ def delete_expense(id=None, note=None, amount=None, spent_at=None, confirm=None)
     )
 
 
+def _validate_kiwisaver_type(value):
+    """Return (value, None) if valid, else (None, error_string)."""
+    allowed = ("employee", "employer", "government", "tax", "fee")
+    if value not in allowed:
+        return None, (
+            f"Error: Invalid kiwisaver type '{value}'. "
+            f"Use one of: {', '.join(allowed)}."
+        )
+    return value, None
+
+
+def add_kiwisaver_daily(date, balance, units=None, unit_price=None):
+    """Insert or replace a KiwiSaver daily balance row (date is UNIQUE)."""
+    try:
+        balance = float(balance)
+    except (TypeError, ValueError):
+        return "Error: balance must be a number."
+    if units is not None:
+        try:
+            units = float(units)
+        except (TypeError, ValueError):
+            return "Error: units must be a number."
+    if unit_price is not None:
+        try:
+            unit_price = float(unit_price)
+        except (TypeError, ValueError):
+            return "Error: unit_price must be a number."
+
+    conn = _connect()
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO kiwisaver_daily (date, balance, units, unit_price)
+            VALUES (?, ?, ?, ?)
+            """,
+            (date, balance, units, unit_price),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return f"Kiwisaver daily balance for {date}: {balance}."
+
+
+def list_kiwisaver_daily():
+    """Return all KiwiSaver daily balance rows."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT date, balance, units, unit_price FROM kiwisaver_daily ORDER BY date"
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return "No Kiwisaver daily balances recorded."
+    lines = [
+        f"{date} - balance {balance} - units {units} - unit_price {unit_price}"
+        for date, balance, units, unit_price in rows
+    ]
+    return "\n".join(lines)
+
+
+def add_kiwisaver_adjustment(date, amount, type):
+    """Insert a KiwiSaver adjustment row. type must be employee, employer, government, tax, or fee."""
+    type, error = _validate_kiwisaver_type(type)
+    if error:
+        return error
+    try:
+        amount = float(amount)
+    except (TypeError, ValueError):
+        return "Error: amount must be a number."
+
+    conn = _connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO kiwisaver_adjustments (date, amount, type)
+            VALUES (?, ?, ?)
+            """,
+            (date, amount, type),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return f"Kiwisaver adjustment {type} {amount} on {date}."
+
+
+def list_kiwisaver_adjustments():
+    """Return all KiwiSaver adjustment rows."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT id, date, amount, type FROM kiwisaver_adjustments ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return "No Kiwisaver adjustments recorded."
+    lines = [
+        f"id {r[0]}: {r[1]} - {r[2]} - {r[3]}" for r in rows
+    ]
+    return "\n".join(lines)
+
+
 TOOL_FUNCTIONS = {
     "add_expense": add_expense,
     "list_expenses": list_expenses,
     "total_by_category": total_by_category,
     "delete_expense": delete_expense,
+    "add_kiwisaver_daily": add_kiwisaver_daily,
+    "list_kiwisaver_daily": list_kiwisaver_daily,
+    "add_kiwisaver_adjustment": add_kiwisaver_adjustment,
+    "list_kiwisaver_adjustments": list_kiwisaver_adjustments,
 }
 
 # The "menu" the model sees: name + description + inputs for each tool
@@ -417,6 +560,55 @@ TOOLS = [
                 },
                 "required": [],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_kiwisaver_daily",
+            "description": "Insert or replace a KiwiSaver daily balance row for a date.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string", "description": "YYYY-MM-DD date of the balance."},
+                    "balance": {"type": "number", "description": "KiwiSaver balance."},
+                    "units": {"type": "number", "description": "Number of units (optional)."},
+                    "unit_price": {"type": "number", "description": "Price per unit (optional)."},
+                },
+                "required": ["date", "balance"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_kiwisaver_daily",
+            "description": "List all KiwiSaver daily balance rows.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_kiwisaver_adjustment",
+            "description": "Add a KiwiSaver adjustment (employee, employer, government, tax, or fee).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string", "description": "YYYY-MM-DD date of the adjustment."},
+                    "amount": {"type": "number", "description": "Adjustment amount (can be negative)."},
+                    "type": {"type": "string", "description": "One of: employee, employer, government, tax, fee."},
+                },
+                "required": ["date", "amount", "type"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_kiwisaver_adjustments",
+            "description": "List all KiwiSaver adjustment rows.",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
 ]
