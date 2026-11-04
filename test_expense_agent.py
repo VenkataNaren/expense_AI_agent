@@ -1006,6 +1006,47 @@ def test_kiwisaver_performance_realistic_no_adjustments(agent):
     assert "-0.91%" in list_result
 
 
+def test_kiwisaver_performance_unit_price_ignores_adjustment(agent):
+    """With unit_price on both ends, basis is unit price and adjustments are ignored."""
+    dates = [
+        "2026-10-15", "2026-10-16", "2026-10-17", "2026-10-18", "2026-10-19",
+        "2026-10-20", "2026-10-21", "2026-10-22", "2026-10-23", "2026-10-24",
+        "2026-10-25", "2026-10-26", "2026-10-27", "2026-10-28", "2026-10-29",
+        "2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02", "2026-11-03",
+        "2026-11-04", "2026-11-05",
+    ]
+    balances = [
+        10000.00, 10000.00, 9969.24, 9952.61, 10146.39,
+        10130.53, 10115.32, 10115.32, 10115.32, 10115.32,
+        10115.32, 10115.32, 10175.46, 10103.16, 10061.15,
+        10119.52, 10119.52, 10119.52, 10182.75, 10182.75,
+        10090.14, 10062.89,
+    ]
+    for d, b in zip(dates, balances):
+        agent.add_kiwisaver_daily(d, b, unit_price=b / 1000.0)
+
+    # Add a large employee adjustment mid-period — must be ignored on unit-price basis
+    agent.add_kiwisaver_adjustment("2026-10-28", 500.0, "employee")
+
+    result = agent.kiwisaver_performance("2026-10-15", "2026-11-05")
+    assert "Basis: unit price" in result
+    assert "Days: 22" in result
+    assert "Start value: 10.00" in result
+    assert "End value: 10.06" in result
+    assert "Change: +0.63%" in result
+    assert "500" not in result  # adjustment must not appear
+
+
+def test_kiwisaver_stale_day_with_adjustment_still_flagged(agent):
+    """A stale day with an adjustment is still flagged stale (raw balance, not adjusted)."""
+    agent.add_kiwisaver_daily("2026-10-15", 10000.00)
+    agent.add_kiwisaver_daily("2026-10-16", 10000.00)  # stale: same balance
+    agent.add_kiwisaver_adjustment("2026-10-16", 500.0, "employee")  # adjustment on stale day
+
+    result = agent.kiwisaver_performance("2026-10-15", "2026-10-16")
+    assert "Stale days (unchanged balance): 2026-10-16" in result
+
+
 def test_list_expenses_returns_all(agent):
     """list_expenses should return every recorded expense."""
     agent.add_expense("10.50", "Food", "lunch")

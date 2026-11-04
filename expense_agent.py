@@ -699,6 +699,7 @@ def _build_kiwisaver_series(start_date=None, end_date=None):
 
     series = []
     prev_basis_value = None
+    prev_raw_balance = None
     stale_days = []
     daily_changes = []  # (date, pct)
     skipped_rows = []
@@ -723,6 +724,7 @@ def _build_kiwisaver_series(start_date=None, end_date=None):
                 )
                 # Keep the last valid basis_value so a later row can still
                 # compute a % change across the gap.
+                prev_raw_balance = balance
                 continue
         else:
             basis_value = balance - adj_cumulative_by_date.get(date, 0.0)
@@ -739,12 +741,8 @@ def _build_kiwisaver_series(start_date=None, end_date=None):
         else:
             daily_pct_change = "N/A"
 
-        # Stale day: basis value unchanged from previous row.
-        is_stale = (
-            prev_basis_value is not None
-            and basis_value is not None
-            and basis_value == prev_basis_value
-        )
+        # Stale day: raw balance unchanged from previous row (independent of basis).
+        is_stale = prev_raw_balance is not None and balance == prev_raw_balance
         if is_stale:
             stale_days.append(date)
 
@@ -768,6 +766,7 @@ def _build_kiwisaver_series(start_date=None, end_date=None):
             }
         )
         prev_basis_value = basis_value
+        prev_raw_balance = balance
 
     start_value = series[0]["basis_value"]
     end_value = series[-1]["basis_value"]
