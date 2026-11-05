@@ -2423,13 +2423,14 @@ def test_tool_descriptions_are_shorter_than_original(tmp_path, monkeypatch):
         "add_expense": 21,
         "list_expenses": 27,
         "total_by_category": 36,
-        "delete_expense": 143,
-        "add_kiwisaver_daily": 59,
+        "delete_expense": 100,
+        "delete_and_list_expenses": 132,
+        "add_kiwisaver_daily": 55,
         "list_kiwisaver_daily": 38,
-        "add_kiwisaver_adjustment": 73,
+        "add_kiwisaver_adjustment": 70,
         "list_kiwisaver_adjustments": 35,
-        "list_kiwisaver": 126,
-        "kiwisaver_performance": 129,
+        "list_kiwisaver": 108,
+        "kiwisaver_performance": 111,
     }
 
     for tool in expense_agent.TOOLS:
@@ -2452,7 +2453,7 @@ def test_tool_descriptions_total_is_shorter(tmp_path, monkeypatch):
     )
 
     total = sum(len(t["function"]["description"]) for t in expense_agent.TOOLS)
-    assert total < 687, f"Total tool descriptions: {total} chars, expected < 687"
+    assert total < 740, f"Total tool descriptions: {total} chars, expected < 740"
 
 
 def test_benchmark_results_match_baseline(tmp_path, monkeypatch):

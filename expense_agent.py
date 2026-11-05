@@ -411,6 +411,115 @@ def delete_expense(id=None, note=None, amount=None, spent_at=None, confirm=None)
     )
 
 
+def delete_and_list_expenses(id=None, note=None, amount=None, spent_at=None, confirm=None):
+    """Delete matching expenses and return the remaining list, with y/n confirmation guardrail.
+
+    Phase 1: Call without confirm to preview what would be deleted and what will remain.
+    Phase 2: Call with confirm="y" to delete and return remaining expenses.
+    Call with confirm="n" to cancel.
+    """
+    global _PENDING_DELETE
+    confirm = (confirm or "").strip().lower()
+
+    conditions = []
+    params = []
+    if id is not None:
+        conditions.append("id = ?")
+        params.append(int(id))
+    if note is not None:
+        conditions.append("note = ?")
+        params.append(note)
+    if amount is not None:
+        conditions.append("amount = ?")
+        params.append(float(amount))
+    if spent_at is not None:
+        dt, error = _parse_spent_at(spent_at)
+        if error:
+            return error
+        conditions.append("spent_at = ?")
+        params.append(dt.strftime("%Y-%m-%d %H:%M"))
+
+    if not conditions:
+        return (
+            "Error: Please specify at least one of id, note, amount, or spent_at "
+            "to identify the expense to delete."
+        )
+
+    where = " AND ".join(conditions)
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            f"SELECT id, amount, category, note, spent_at FROM expenses WHERE {where}",
+            params,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return "No matching expense found."
+
+    details = [
+        f"ID {r[0]}: {r[1]} - {r[2]} - {r[3]} - {format_time_12h(r[4])}" for r in rows
+    ]
+    preview = "\n".join(details)
+
+    if confirm in ("y", "yes"):
+        pending = _PENDING_DELETE
+        if pending["criteria"] is not None:
+            where = pending["where"]
+            params = pending["params"]
+            rows = pending["rows"]
+            preview = pending["preview"]
+            _PENDING_DELETE = {"criteria": None, "rows": None}
+
+        conn = _connect()
+        try:
+            conn.execute(f"DELETE FROM expenses WHERE {where}", params)
+            conn.commit()
+        finally:
+            conn.close()
+
+        remaining = _get_all_expenses()
+        return (
+            f"Deleted {len(rows)} record(s):\n{preview}\n\n"
+            f"Remaining expenses:\n{remaining}"
+        )
+
+    if confirm in ("n", "no"):
+        _PENDING_DELETE = {"criteria": None, "rows": None}
+        return "Deletion cancelled. No changes were made."
+
+    _PENDING_DELETE = {
+        "criteria": (id, note, amount, spent_at),
+        "rows": rows,
+        "where": where,
+        "params": params,
+        "preview": preview,
+    }
+    return (
+        f"Found {len(rows)} matching expense(s) to delete:\n{preview}\n\n"
+        "Are you sure you want to delete this record? (y/n)"
+    )
+
+
+def _get_all_expenses():
+    """Return all remaining expenses as a formatted string."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT id, amount, category, note, spent_at FROM expenses ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return "No expenses remaining."
+    lines = [
+        f"ID {r[0]}: {r[1]} - {r[2]} - {r[3]} - {format_time_12h(r[4])}"
+        for r in rows
+    ]
+    return "\n".join(lines)
+
+
 def _validate_kiwisaver_type(value):
     """Return (value, None) if valid, else (None, error_string)."""
     allowed = ("employee", "employer", "government", "tax", "fee")
@@ -915,6 +1024,7 @@ TOOL_FUNCTIONS = {
     "list_expenses": list_expenses,
     "total_by_category": total_by_category,
     "delete_expense": delete_expense,
+    "delete_and_list_expenses": delete_and_list_expenses,
     "add_kiwisaver_daily": add_kiwisaver_daily,
     "list_kiwisaver_daily": list_kiwisaver_daily,
     "add_kiwisaver_adjustment": add_kiwisaver_adjustment,
@@ -982,6 +1092,44 @@ TOOLS = [
         "function": {
             "name": "delete_expense",
             "description": "Delete an expense by ID, note, amount, or timestamp. Provide at least one criterion; all must match.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "integer",
+                        "description": "The expense ID (shown in the expense list)",
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "Exact description/note of the expense",
+                    },
+                    "amount": {"type": "number", "description": "Amount spent"},
+                    "spent_at": {
+                        "type": "string",
+                        "description": (
+                            "When the expense happened. Accepts 'YYYY-MM-DD HH:MM' "
+                            "(24-hour), 'YYYY-MM-DD hh:MM AM/PM' (12-hour), or "
+                            "'YYYY-MM-DD' (date only = midnight)."
+                        ),
+                    },
+                    "confirm": {
+                        "type": "string",
+                        "description": (
+                            'Confirmation flag. Set to "y" or "yes" to actually perform '
+                            'the deletion after previewing matches; "n" or "no" to cancel. '
+                            "Omit to preview matches and request confirmation."
+                        ),
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_and_list_expenses",
+            "description": "Delete an expense by ID, note, amount, or timestamp, then return the remaining list. Provide at least one criterion; all must match.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1107,6 +1255,8 @@ SYSTEM_PROMPT = (
     "To correct/remove an expense (duplicate, wrong amount/timestamp), call delete_expense "
     "WITHOUT confirm first to preview matches. Ask: 'Are you sure you want to delete this record? (y/n)'. "
     "On 'y'/'yes', call delete_expense with confirm='y'; on 'n'/'no', use confirm='n'. "
+    "For delete + remaining list in one call, use delete_and_list_expenses "
+    "(same confirm flow). "
     "Then add the corrected record with add_expense. Confirm what was deleted/corrected. "
     "For future-dated add_expense, tool previews and asks 'Are you sure you want to add this record? (y/n)'. "
     "On 'y'/'yes', call add_expense with confirm='y'; on 'n'/'no', use confirm='n'. "
