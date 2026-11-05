@@ -26,6 +26,16 @@ client = OpenAI(
 )
 MODEL = os.environ.get("NVIDIA_MODEL", "nvidia/nemotron-3.5-super-vl-120b-a12b")
 
+# Pricing config: cost per 1M input tokens and per 1M output tokens, in USD.
+# Fill in real values for each model you use. Models not listed here are
+# treated as "unknown" pricing (not zero).
+PRICING = {
+    "nvidia/nemotron-3.5-super-vl-120b-a12b": {
+        "input_per_1m": 0.00,   # placeholder - fill in real value
+        "output_per_1m": 0.00,  # placeholder - fill in real value
+    },
+}
+
 MAX_STEPS = 5  # safety limit so the loop can never run forever
 
 
@@ -1142,6 +1152,36 @@ def _record_llm_call(request_id, step, model, prompt_tokens, completion_tokens, 
         conn.commit()
     finally:
         conn.close()
+
+
+def request_cost(request_id):
+    """Estimate the cost of a single request given its request_id.
+
+    Looks up the model, prompt_tokens, and completion_tokens from llm_calls,
+    then computes cost using PRICING. Returns None if the request_id is not
+    found or the model has no pricing entry (treated as unknown, not zero).
+    """
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT model, prompt_tokens, completion_tokens FROM llm_calls "
+            "WHERE request_id = ?",
+            (request_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        return None
+
+    model, prompt_tokens, completion_tokens = row
+    pricing = PRICING.get(model)
+    if pricing is None:
+        return None
+
+    cost = (prompt_tokens or 0) * pricing["input_per_1m"] / 1_000_000
+    cost += (completion_tokens or 0) * pricing["output_per_1m"] / 1_000_000
+    return cost
 
 
 def run_agent(user_message, history):

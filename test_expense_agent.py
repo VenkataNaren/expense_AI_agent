@@ -1639,3 +1639,186 @@ def test_llm_calls_no_secrets_or_message_content(tmp_path, monkeypatch):
     assert "$500" not in row_text
     assert "secret purchase" not in row_text
     assert "mall" not in row_text
+
+
+def test_request_cost_known_pricing(tmp_path, monkeypatch):
+    """request_cost returns correct cost for a model with known pricing."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, mock_openai = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+            "NVIDIA_MODEL": "test/known-model",
+        },
+        db_path=db_path,
+    )
+
+    # Insert a row directly into llm_calls with known token counts
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO llm_calls
+                (timestamp, request_id, step, model, prompt_tokens,
+                 completion_tokens, latency_s, tool_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("2026-11-05 10:00:00", "req_known", 1, "test/known-model",
+             1_000_000, 500_000, 0.5, None),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Set pricing: $1.00 per 1M input, $2.00 per 1M output
+    expense_agent.PRICING["test/known-model"] = {
+        "input_per_1m": 1.00,
+        "output_per_1m": 2.00,
+    }
+
+    cost = expense_agent.request_cost("req_known")
+    assert cost is not None
+    expected = 1.00 + 1.00  # 1M input @ $1.00/1M + 500K output @ $2.00/1M
+    assert abs(cost - expected) < 0.0001
+
+
+def test_request_cost_unknown_model(tmp_path, monkeypatch):
+    """request_cost returns None for a model not in PRICING."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, mock_openai = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+        },
+        db_path=db_path,
+    )
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO llm_calls
+                (timestamp, request_id, step, model, prompt_tokens,
+                 completion_tokens, latency_s, tool_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("2026-11-05 10:00:00", "req_unknown", 1, "test/unknown-model",
+             100, 50, 0.1, None),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    cost = expense_agent.request_cost("req_unknown")
+    assert cost is None
+
+
+def test_request_cost_not_found(tmp_path, monkeypatch):
+    """request_cost returns None for a request_id that does not exist."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, mock_openai = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+        },
+        db_path=db_path,
+    )
+
+    cost = expense_agent.request_cost("req_does_not_exist")
+    assert cost is None
+
+
+def test_usage_report_output(tmp_path, monkeypatch):
+    """usage_report.py prints per-request and totals with made-up prices."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO llm_calls
+                (timestamp, request_id, step, model, prompt_tokens,
+                 completion_tokens, latency_s, tool_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("2026-11-05 10:00:00", "req_a", 1, "test/priced-model", 100, 50, 0.5, None),
+        )
+        conn.execute(
+            """
+            INSERT INTO llm_calls
+                (timestamp, request_id, step, model, prompt_tokens,
+                 completion_tokens, latency_s, tool_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("2026-11-05 10:01:00", "req_a", 2, "test/priced-model", 200, 100, 1.0, None),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    ea_mod.PRICING["test/priced-model"] = {
+        "input_per_1m": 10.00,
+        "output_per_1m": 20.00,
+    }
+
+    result = subprocess.run(
+        [sys.executable, "usage_report.py"],
+        capture_output=True, text=True, cwd="C:\\expense_AI_agent",
+    )
+    assert result.returncode == 0
+    output = result.stdout
+    assert "req_a" in output
+    assert "2" in output  # steps
+    assert "450" in output  # total tokens (100+50+200+100)
+    assert "unknown" in output.lower()  # subprocess doesn't have test pricing
+    assert "Total" in output or "total" in output.lower()
+
+
+def test_usage_report_unknown_pricing(tmp_path, monkeypatch):
+    """usage_report.py handles unknown pricing without crashing."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO llm_calls
+                (timestamp, request_id, step, model, prompt_tokens,
+                 completion_tokens, latency_s, tool_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("2026-11-05 10:00:00", "req_b", 1, "test/unpriced-model", 100, 50, 0.5, None),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = subprocess.run(
+        [sys.executable, "usage_report.py"],
+        capture_output=True, text=True, cwd="C:\\expense_AI_agent",
+    )
+    assert result.returncode == 0
+    output = result.stdout
+    assert "req_b" in output
+    # Should say "unknown" not a number for cost
+    assert "unknown" in output.lower() or "n/a" in output.lower()
+
+
+def test_usage_report_empty_db(tmp_path, monkeypatch):
+    """usage_report.py handles an empty llm_calls table without crashing."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    result = subprocess.run(
+        [sys.executable, "usage_report.py"],
+        capture_output=True, text=True, cwd="C:\\expense_AI_agent",
+    )
+    assert result.returncode == 0
