@@ -1825,7 +1825,8 @@ def test_benchmark_seeds_data(tmp_path, monkeypatch):
     finally:
         conn.close()
 
-    assert expense_count == 5
+    # 5 seeded + 1 net added by benchmark prompts (2 added, 1 deleted)
+    assert expense_count == 6
     assert kiwisaver_count == 10
 
 
@@ -1895,4 +1896,374 @@ def test_usage_report_unknown_pricing(tmp_path, monkeypatch):
         capture_output=True, text=True, cwd="C:\\expense_AI_agent",
     )
     assert result.returncode == 0
+
+
+def test_run_agent_truncates_history_to_last_n(tmp_path, monkeypatch):
+    """run_agent keeps only system prompt + last MAX_HISTORY_MESSAGES."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, mock_openai = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+            "MAX_HISTORY_MESSAGES": "3",
+        },
+        db_path=db_path,
+    )
+
+    mock_client = mock_openai.return_value
+
+    response = mock.Mock()
+    response.id = "resp_1"
+    response.usage = None
+    response.choices = [mock.Mock()]
+    response.choices[0].message = mock.Mock()
+    response.choices[0].message.tool_calls = []
+    response.choices[0].message.content = "done"
+    mock_client.chat.completions.create.return_value = response
+
+    history = [{"role": "system", "content": expense_agent.SYSTEM_PROMPT}]
+    for i in range(8):
+        history.append({"role": "user", "content": f"message {i}"})
+
+    sent_messages = []
+
+    def capture_create(*args, **kwargs):
+        sent_messages.append(kwargs.get("messages", []))
+        return response
+
+    mock_client.chat.completions.create.side_effect = capture_create
+
+    expense_agent.run_agent("final question", history)
+
+    assert len(sent_messages) == 1
+    msgs = sent_messages[0]
+    assert msgs[0]["role"] == "system"
+    assert msgs[0]["content"] == expense_agent.SYSTEM_PROMPT
+    assert msgs[1]["role"] == "system"
+    assert "Current local time" in msgs[1]["content"]
+    assert msgs[2]["content"] == "final question"
+
+
+def test_run_agent_keeps_system_prompt(tmp_path, monkeypatch):
+    """system prompt is never dropped, even when history exceeds limit."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, mock_openai = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+            "MAX_HISTORY_MESSAGES": "1",
+        },
+        db_path=db_path,
+    )
+
+    mock_client = mock_openai.return_value
+
+    mock_client = mock_openai.return_value
+
+    response = mock.Mock()
+    response.id = "resp_1"
+    response.usage = None
+    response.choices = [mock.Mock()]
+    response.choices[0].message = mock.Mock()
+    response.choices[0].message.tool_calls = []
+    response.choices[0].message.content = "done"
+    mock_client.chat.completions.create.return_value = response
+
+    history = [{"role": "system", "content": "SYSTEM: never drop me"}]
+    history.append({"role": "user", "content": "question 1"})
+    history.append({"role": "user", "content": "question 2"})
+
+    sent = []
+
+    def capture_create(*args, **kwargs):
+        sent.append(kwargs.get("messages", []))
+        return response
+
+    mock_client.chat.completions.create.side_effect = capture_create
+
+    expense_agent.run_agent("question 3", history)
+
+    assert len(sent) == 1
+    msgs = sent[0]
+    assert msgs[0]["role"] == "system"
+    assert msgs[0]["content"] == "SYSTEM: never drop me"
+
+
+def test_run_agent_preserves_tool_call_pairs(tmp_path, monkeypatch):
+    """tool_call and its tool result are kept together in truncated history."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, mock_openai = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+            "MAX_HISTORY_MESSAGES": "4",
+        },
+        db_path=db_path,
+    )
+
+    mock_client = mock_openai.return_value
+
+    first_response = mock.Mock()
+    first_response.id = "resp_1"
+    first_response.usage = None
+    first_response.choices = [mock.Mock()]
+    first_response.choices[0].message = mock.Mock()
+    tool_call = mock.Mock()
+    tool_call.id = "call_abc"
+    tool_call.function.name = "add_expense"
+    tool_call.function.arguments = '{"amount": 10, "category": "food"}'
+    first_response.choices[0].message.tool_calls = [tool_call]
+    first_response.choices[0].message.content = None
+
+    second_response = mock.Mock()
+    second_response.id = "resp_2"
+    second_response.usage = None
+    second_response.choices = [mock.Mock()]
+    second_response.choices[0].message = mock.Mock()
+    second_response.choices[0].message.tool_calls = []
+    second_response.choices[0].message.content = "Done"
+
+    mock_client.chat.completions.create.side_effect = [first_response, second_response]
+
+    history = [
+        {"role": "system", "content": expense_agent.SYSTEM_PROMPT},
+        {"role": "user", "content": "add expense"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "call_old", "function": {"name": "list_expenses", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "call_old", "content": "no expenses"},
+        {"role": "user", "content": "add coffee"},
+    ]
+
+    sent = []
+
+    def capture_create(*args, **kwargs):
+        sent.append(kwargs.get("messages", []))
+        return second_response
+
+    mock_client.chat.completions.create.side_effect = capture_create
+
+    expense_agent.run_agent("add coffee", history)
+
+    assert len(sent) == 1
+    msgs = sent[0]
+    roles = []
+    for m in msgs:
+        if isinstance(m, dict):
+            roles.append(m.get("role"))
+        else:
+            roles.append("Mock")
+    assert roles[0] == "system"
+    # Check that tool_call and tool result are adjacent if both present
+    tool_call_idx = None
+    tool_result_idx = None
+    for i, m in enumerate(msgs):
+        if isinstance(m, dict) and m.get("tool_calls"):
+            tool_call_idx = i
+        if isinstance(m, dict) and m.get("role") == "tool":
+            tool_result_idx = i
+    if tool_call_idx is not None and tool_result_idx is not None:
+        assert tool_result_idx == tool_call_idx + 1
+
+
+def test_run_agent_truncates_long_tool_result(tmp_path, monkeypatch):
+    """tool results longer than MAX_TOOL_RESULT_CHARS get [truncated]."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, mock_openai = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+            "MAX_TOOL_RESULT_CHARS": "20",
+        },
+        db_path=db_path,
+    )
+
+    mock_client = mock_openai.return_value
+
+    tool_call = mock.Mock()
+    tool_call.id = "call_1"
+    tool_call.function.name = "list_expenses"
+    tool_call.function.arguments = "{}"
+
+    first_response = mock.Mock()
+    first_response.id = "resp_1"
+    first_response.usage = None
+    first_response.choices = [mock.Mock()]
+    first_response.choices[0].message = mock.Mock()
+    first_response.choices[0].message.tool_calls = [tool_call]
+    first_response.choices[0].message.content = None
+
+    second_response = mock.Mock()
+    second_response.id = "resp_2"
+    second_response.usage = None
+    second_response.choices = [mock.Mock()]
+    second_response.choices[0].message = mock.Mock()
+    second_response.choices[0].message.tool_calls = []
+    second_response.choices[0].message.content = "final answer"
+
+    mock_client.chat.completions.create.side_effect = [first_response, second_response]
+
+    captured_results = []
+
+    orig_list = expense_agent.list_expenses
+
+    def capture_list():
+        captured_results.append("called")
+        return "a" * 100
+
+    expense_agent.list_expenses = capture_list
+
+    sent_messages = []
+
+    def capture_create(*args, **kwargs):
+        sent_messages.append(kwargs.get("messages", []))
+        return second_response
+
+    mock_client.chat.completions.create.side_effect = capture_create
+
+    history = [{"role": "system", "content": expense_agent.SYSTEM_PROMPT}]
+
+    call_count = [0]
+
+    def capture_create(*args, **kwargs):
+        sent_messages.append(kwargs.get("messages", []))
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return first_response
+        return second_response
+
+    mock_client.chat.completions.create.side_effect = capture_create
+
+    history = [{"role": "system", "content": expense_agent.SYSTEM_PROMPT}]
+
+    # Patch TOOL_FUNCTIONS so run_agent uses our mock list_expenses
+    orig_add = expense_agent.TOOL_FUNCTIONS["list_expenses"]
+    expense_agent.TOOL_FUNCTIONS["list_expenses"] = capture_list
+
+    expense_agent.run_agent("list expenses", history)
+
+    # Restore
+    expense_agent.TOOL_FUNCTIONS["list_expenses"] = orig_add
+
+    # Find the tool result message (run_agent appends to same list object)
+    tool_result_content = None
+    for msg_list in sent_messages:
+        for m in msg_list:
+            if isinstance(m, dict) and m.get("role") == "tool":
+                tool_result_content = m["content"]
+    assert tool_result_content == "aaaaaaaaaaaaaaaaaaaa\n...[truncated]"
+
+
+def test_run_agent_zero_history_keeps_only_system(tmp_path, monkeypatch):
+    """MAX_HISTORY_MESSAGES=0 keeps only the system prompt."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, mock_openai = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+            "MAX_HISTORY_MESSAGES": "0",
+        },
+        db_path=db_path,
+    )
+
+    mock_client = mock_openai.return_value
+
+    response = mock.Mock()
+    response.id = "resp_1"
+    response.usage = None
+    response.choices = [mock.Mock()]
+    response.choices[0].message = mock.Mock()
+    response.choices[0].message.tool_calls = []
+    response.choices[0].message.content = "done"
+    mock_client.chat.completions.create.return_value = response
+
+    sent = []
+
+    def capture_create(*args, **kwargs):
+        sent.append(kwargs.get("messages", []))
+        return response
+
+    mock_client.chat.completions.create.side_effect = capture_create
+
+    history = [
+        {"role": "system", "content": expense_agent.SYSTEM_PROMPT},
+        {"role": "user", "content": "old message"},
+    ]
+
+    expense_agent.run_agent("new question", history)
+
+    assert len(sent) == 1
+    msgs = sent[0]
+    assert len(msgs) >= 1
+    assert msgs[0]["role"] == "system"
+    assert msgs[0]["content"] == expense_agent.SYSTEM_PROMPT
+
+
+def test_run_agent_short_tool_result_passes_through(tmp_path, monkeypatch):
+    """tool results under the cap are not truncated."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, mock_openai = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+            "MAX_TOOL_RESULT_CHARS": "1000",
+        },
+        db_path=db_path,
+    )
+
+    mock_client = mock_openai.return_value
+
+    tool_call = mock.Mock()
+    tool_call.id = "call_1"
+    tool_call.function.name = "list_expenses"
+    tool_call.function.arguments = "{}"
+
+    first_response = mock.Mock()
+    first_response.id = "resp_1"
+    first_response.usage = None
+    first_response.choices = [mock.Mock()]
+    first_response.choices[0].message = mock.Mock()
+    first_response.choices[0].message.tool_calls = [tool_call]
+    first_response.choices[0].message.content = None
+
+    second_response = mock.Mock()
+    second_response.id = "resp_2"
+    second_response.usage = None
+    second_response.choices = [mock.Mock()]
+    second_response.choices[0].message = mock.Mock()
+    second_response.choices[0].message.tool_calls = []
+    second_response.choices[0].message.content = "final answer"
+
+    mock_client.chat.completions.create.side_effect = [first_response, second_response]
+
+    sent = []
+
+    def capture_create(*args, **kwargs):
+        sent.append(kwargs.get("messages", []))
+        return second_response
+
+    mock_client.chat.completions.create.side_effect = capture_create
+
+    history = [{"role": "system", "content": expense_agent.SYSTEM_PROMPT}]
+
+    call_count = [0]
+
+    def capture_create(*args, **kwargs):
+        sent.append(kwargs.get("messages", []))
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return first_response
+        return second_response
+
+    mock_client.chat.completions.create.side_effect = capture_create
+
+    history = [{"role": "system", "content": expense_agent.SYSTEM_PROMPT}]
+
+    expense_agent.run_agent("list expenses", history)
+
+    # Find the tool result message
+    tool_result_content = None
+    for msg_list in sent:
+        for m in msg_list:
+            if isinstance(m, dict) and m.get("role") == "tool":
+                tool_result_content = m["content"]
+    assert tool_result_content == "No expenses recorded."
 

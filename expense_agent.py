@@ -38,6 +38,9 @@ PRICING = {
 
 MAX_STEPS = 5  # safety limit so the loop can never run forever
 
+MAX_HISTORY_MESSAGES = int(os.environ.get("MAX_HISTORY_MESSAGES", "10"))
+MAX_TOOL_RESULT_CHARS = int(os.environ.get("MAX_TOOL_RESULT_CHARS", "2000"))
+
 
 # ---------- 2. Our tiny "database" ----------
 DB_PATH = os.environ.get("EXPENSES_DB_PATH", "expenses.db")
@@ -1184,6 +1187,68 @@ def request_cost(request_id):
     return cost
 
 
+def _truncate_history(history, max_messages):
+    """Trim history to system prompt + last N messages, keeping tool pairs intact.
+
+    Always keeps the first message (system prompt). Then walks backward from the
+    end, keeping complete tool_call/tool result pairs together. Stops when we
+    have max_messages total or reach the system prompt.
+    """
+    if max_messages <= 0:
+        return [history[0]] if history else []
+
+    system_msg = history[0]
+    rest = history[1:]
+
+    if len(rest) <= max_messages - 1:
+        return history
+
+    # Walk backward, keeping tool pairs together
+    kept = []
+    i = len(rest) - 1
+    while i >= 0 and len(kept) < max_messages - 1:
+        msg = rest[i]
+        msg_role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+        msg_tool_calls = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
+        msg_tool_call_id = msg.get("tool_call_id") if isinstance(msg, dict) else getattr(msg, "tool_call_id", None)
+
+        if msg_role == "tool":
+            # Include the matching assistant message with tool_calls
+            kept.insert(0, msg)
+            # Look backward for the assistant message that made this tool call
+            j = i - 1
+            while j >= 0:
+                candidate = rest[j]
+                candidate_role = candidate.get("role") if isinstance(candidate, dict) else getattr(candidate, "role", None)
+                candidate_tool_calls = candidate.get("tool_calls") if isinstance(candidate, dict) else getattr(candidate, "tool_calls", None)
+                if candidate_role == "assistant" and candidate_tool_calls:
+                    for tc in candidate_tool_calls:
+                        tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                        if tc_id == msg_tool_call_id:
+                            kept.insert(0, candidate)
+                            i = j - 1
+                            break
+                    else:
+                        j -= 1
+                        continue
+                    break
+                j -= 1
+            i = j
+        else:
+            kept.insert(0, msg)
+            i -= 1
+
+    return [system_msg] + kept
+
+
+def _truncate_tool_result(result, max_chars):
+    """Truncate a tool result string if it exceeds max_chars."""
+    result_str = str(result)
+    if len(result_str) <= max_chars:
+        return result_str
+    return result_str[:max_chars] + "\n...[truncated]"
+
+
 def run_agent(user_message, history):
     now = datetime.now()
     current_time_str = now.strftime("%Y-%m-%d %I:%M %p (%A)")
@@ -1193,6 +1258,9 @@ def run_agent(user_message, history):
     tool_calls_made = []
 
     for step in range(1, MAX_STEPS + 1):
+        # Truncate history before each model call
+        history[:] = _truncate_history(history, MAX_HISTORY_MESSAGES)
+
         start = time.perf_counter()
         response = client.chat.completions.create(
             model=MODEL, messages=history, tools=TOOLS
@@ -1236,6 +1304,7 @@ def run_agent(user_message, history):
                 result = TOOL_FUNCTIONS[name](**args)
             except Exception as error:  # never crash on a bad tool call
                 result = f"Error: {error}"
+            result = _truncate_tool_result(result, MAX_TOOL_RESULT_CHARS)
             print(f"  [tool] {name} -> {result}")  # simple logging
             tool_calls_made.append(
                 {"name": name, "args": args, "result": str(result)}
