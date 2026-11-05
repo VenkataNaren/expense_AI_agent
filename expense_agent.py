@@ -40,6 +40,7 @@ MAX_STEPS = 5  # safety limit so the loop can never run forever
 
 MAX_HISTORY_MESSAGES = int(os.environ.get("MAX_HISTORY_MESSAGES", "10"))
 MAX_TOOL_RESULT_CHARS = int(os.environ.get("MAX_TOOL_RESULT_CHARS", "2000"))
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "256"))  # max output tokens per model call
 
 
 # ---------- 2. Our tiny "database" ----------
@@ -1096,7 +1097,8 @@ TOOLS = [
 ]
 
 SYSTEM_PROMPT = (
-    "You are an expense helper. Use tools to record and report expenses. "
+    "You are an expense helper. Keep answers short and direct unless the user asks for detail. "
+    "Use tools to record and report expenses. "
     "Never invent numbers; call a tool for data. "
     "Current local time is injected each message. "
     "Convert relative times ('yesterday', 'this morning', 'at 3pm', 'noon', 'midnight') "
@@ -1254,7 +1256,7 @@ def run_agent(user_message, history):
 
         start = time.perf_counter()
         response = client.chat.completions.create(
-            model=MODEL, messages=history, tools=TOOLS
+            model=MODEL, messages=history, tools=TOOLS, max_tokens=MAX_TOKENS
         )
         latency_s = time.perf_counter() - start
 

@@ -2268,6 +2268,87 @@ def test_run_agent_short_tool_result_passes_through(tmp_path, monkeypatch):
     assert tool_result_content == "No expenses recorded."
 
 
+def test_run_agent_passes_max_tokens(tmp_path, monkeypatch):
+    """run_agent passes max_tokens to model calls."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, mock_openai = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+        },
+        db_path=db_path,
+    )
+
+    mock_client = mock_openai.return_value
+
+    response = mock.Mock()
+    response.id = "resp_1"
+    response.usage = mock.Mock()
+    response.usage.prompt_tokens = 10
+    response.usage.completion_tokens = 5
+    response.choices = [mock.Mock()]
+    response.choices[0].message = mock.Mock()
+    response.choices[0].message.tool_calls = []
+    response.choices[0].message.content = "done"
+    mock_client.chat.completions.create.return_value = response
+
+    history = [{"role": "system", "content": expense_agent.SYSTEM_PROMPT}]
+    expense_agent.run_agent("hello", history)
+
+    call_kwargs = mock_client.chat.completions.create.call_args.kwargs
+    assert "max_tokens" in call_kwargs, "max_tokens not passed to model"
+    assert call_kwargs["max_tokens"] == expense_agent.MAX_TOKENS
+
+
+def test_system_prompt_instructs_short_answers(tmp_path, monkeypatch):
+    """SYSTEM_PROMPT instructs the model to keep answers short."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, _ = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+        },
+        db_path=db_path,
+    )
+
+    sp = expense_agent.SYSTEM_PROMPT.lower()
+    assert "short" in sp
+    assert "brief" in sp or "concise" in sp or "short" in sp
+
+
+def test_benchmark_completion_tokens_decrease(tmp_path, monkeypatch):
+    """Benchmark completion tokens decrease with max_tokens set."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    result = subprocess.run(
+        [sys.executable, "benchmark_agent.py"],
+        capture_output=True, text=True, cwd="C:\\expense_AI_agent",
+    )
+    assert result.returncode == 0
+
+    import json
+    import pathlib
+
+    baseline_path = None
+    for p in pathlib.Path(tmp_path).rglob("benchmark_baseline.json"):
+        baseline_path = p
+        break
+
+    assert baseline_path is not None, "benchmark_baseline.json not found"
+
+    with open(baseline_path) as f:
+        data = json.loads(f.read())
+
+    # Verify completion tokens are all set (not None)
+    for r in data["results"]:
+        assert r["completion_tokens"] is not None
+        assert r["completion_tokens"] > 0
+        assert r["completion_tokens"] <= ea_mod.MAX_TOKENS
+
+
 def test_system_prompt_contains_all_rules(tmp_path, monkeypatch):
     """SYSTEM_PROMPT must contain all key rules after shortening."""
     db_path = tmp_path / "expenses.db"
