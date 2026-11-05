@@ -171,6 +171,22 @@ def _parse_spent_at(value):
 
 def add_expense(amount, category, note="", spent_at=None, confirm=None):
     """Record a new expense, with confirmation guardrail for future timestamps."""
+    # Validate amount
+    try:
+        amount_val = float(amount)
+    except (TypeError, ValueError):
+        return "Error: amount must be a number."
+    if amount_val <= 0:
+        return "Error: amount must be greater than 0."
+
+    # Validate category
+    if not category or not category.strip():
+        return "Error: category is required."
+
+    category_stored = category.strip().lower()
+    category_display = category.strip()
+    amount_display = amount
+
     dt, error = _parse_spent_at(spent_at)
     if error:
         return error
@@ -180,12 +196,12 @@ def add_expense(amount, category, note="", spent_at=None, confirm=None):
 
     if dt > now:
         details = {
-            "amount": float(amount),
-            "category": category.lower(),
+            "amount": amount_val,
+            "category": category_stored,
             "note": note,
             "spent_at": dt.strftime("%Y-%m-%d %H:%M"),
-            "display_amount": amount,
-            "display_category": category,
+            "display_amount": amount_display,
+            "display_category": category_display,
         }
 
         if confirm in ("y", "yes"):
@@ -199,18 +215,18 @@ def add_expense(amount, category, note="", spent_at=None, confirm=None):
         _PENDING_ADD = {"details": details}
         return (
             f"Found a future-dated expense to add:\n"
-            f"{details['display_amount']} - {details['category']} - {details['note']} - "
+            f"{details['display_amount']} - {details['display_category']} - {details['note']} - "
             f"{format_time_12h(details['spent_at'])}\n\n"
             "The date/time is in the future. Are you sure you want to add this record? (y/n)"
         )
 
     details = {
-        "amount": float(amount),
-        "category": category.lower(),
+        "amount": amount_val,
+        "category": category_stored,
         "note": note,
         "spent_at": dt.strftime("%Y-%m-%d %H:%M"),
-        "display_amount": amount,
-        "display_category": category,
+        "display_amount": amount_display,
+        "display_category": category_display,
     }
     return _perform_add(details)
 
@@ -270,8 +286,14 @@ def delete_expense(id=None, note=None, amount=None, spent_at=None):
         conditions.append("note = ?")
         params.append(note)
     if amount is not None:
+        try:
+            amount = float(amount)
+        except (TypeError, ValueError):
+            return "Error: amount must be a number."
+        if amount <= 0:
+            return "Error: amount must be greater than 0."
         conditions.append("amount = ?")
-        params.append(float(amount))
+        params.append(amount)
     if spent_at is not None:
         dt, error = _parse_spent_at(spent_at)
         if error:
@@ -338,8 +360,14 @@ def delete_expense(id=None, note=None, amount=None, spent_at=None, confirm=None)
         conditions.append("note = ?")
         params.append(note)
     if amount is not None:
+        try:
+            amount = float(amount)
+        except (TypeError, ValueError):
+            return "Error: amount must be a number."
+        if amount <= 0:
+            return "Error: amount must be greater than 0."
         conditions.append("amount = ?")
-        params.append(float(amount))
+        params.append(amount)
     if spent_at is not None:
         dt, error = _parse_spent_at(spent_at)
         if error:
@@ -430,8 +458,14 @@ def delete_and_list_expenses(id=None, note=None, amount=None, spent_at=None, con
         conditions.append("note = ?")
         params.append(note)
     if amount is not None:
+        try:
+            amount = float(amount)
+        except (TypeError, ValueError):
+            return "Error: amount must be a number."
+        if amount <= 0:
+            return "Error: amount must be greater than 0."
         conditions.append("amount = ?")
-        params.append(float(amount))
+        params.append(amount)
     if spent_at is not None:
         dt, error = _parse_spent_at(spent_at)
         if error:
