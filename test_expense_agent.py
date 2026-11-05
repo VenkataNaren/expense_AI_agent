@@ -2267,3 +2267,152 @@ def test_run_agent_short_tool_result_passes_through(tmp_path, monkeypatch):
                 tool_result_content = m["content"]
     assert tool_result_content == "No expenses recorded."
 
+
+def test_system_prompt_contains_all_rules(tmp_path, monkeypatch):
+    """SYSTEM_PROMPT must contain all key rules after shortening."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, _ = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+        },
+        db_path=db_path,
+    )
+
+    sp = expense_agent.SYSTEM_PROMPT.lower()
+
+    # Core rules
+    assert "never invent numbers" in sp
+    assert "call a tool" in sp
+
+    # Relative time conversion
+    assert "yesterday" in sp
+    assert "noon" in sp
+    assert "midnight" in sp
+    assert "12:00 pm" in sp
+
+    # Delete-then-add confirmation flow
+    assert "without confirm" in sp
+    assert "are you sure you want to delete this record" in sp
+    assert "confirm=" in sp  # confirm="y"/confirm='y' variants
+    assert "confirm='n'" in sp or 'confirm="n"' in sp  # cancel variant
+
+    # Future-dated add confirmation
+    assert "future-dated" in sp
+    assert "are you sure you want to add this record" in sp
+
+    # KiwiSaver tools
+    assert "kiwisaver" in sp
+    assert "list_kiwisaver" in sp
+    assert "kiwisaver_performance" in sp
+
+    # Not financial advice
+    assert "not financial advice" in sp
+
+
+def test_system_prompt_is_shorter_than_original(tmp_path, monkeypatch):
+    """SYSTEM_PROMPT must be shorter than the original 1943 characters."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, _ = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+        },
+        db_path=db_path,
+    )
+
+    assert len(expense_agent.SYSTEM_PROMPT) < 1943, (
+        f"SYSTEM_PROMPT is {len(expense_agent.SYSTEM_PROMPT)} chars, "
+        f"expected < 1943"
+    )
+
+
+def test_tool_descriptions_are_shorter_than_original(tmp_path, monkeypatch):
+    """Each tool description must be shorter than the original."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, _ = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+        },
+        db_path=db_path,
+    )
+
+    original_lengths = {
+        "add_expense": 21,
+        "list_expenses": 27,
+        "total_by_category": 36,
+        "delete_expense": 143,
+        "add_kiwisaver_daily": 59,
+        "list_kiwisaver_daily": 38,
+        "add_kiwisaver_adjustment": 73,
+        "list_kiwisaver_adjustments": 35,
+        "list_kiwisaver": 126,
+        "kiwisaver_performance": 129,
+    }
+
+    for tool in expense_agent.TOOLS:
+        name = tool["function"]["name"]
+        desc = tool["function"]["description"]
+        assert len(desc) <= original_lengths[name], (
+            f"{name}: {len(desc)} chars, expected <= {original_lengths[name]}"
+        )
+
+
+def test_tool_descriptions_total_is_shorter(tmp_path, monkeypatch):
+    """Total tool description characters must be less than 687."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, _ = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+        },
+        db_path=db_path,
+    )
+
+    total = sum(len(t["function"]["description"]) for t in expense_agent.TOOLS)
+    assert total < 687, f"Total tool descriptions: {total} chars, expected < 687"
+
+
+def test_benchmark_results_match_baseline(tmp_path, monkeypatch):
+    """Benchmark results must match baseline after shortening."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    result = subprocess.run(
+        [sys.executable, "benchmark_agent.py"],
+        capture_output=True, text=True, cwd="C:\\expense_AI_agent",
+    )
+    assert result.returncode == 0
+
+    # Find benchmark_baseline.json in tmp_path subtree
+    import json
+    import pathlib
+
+    baseline_path = None
+    for p in pathlib.Path(tmp_path).rglob("benchmark_baseline.json"):
+        baseline_path = p
+        break
+
+    assert baseline_path is not None, "benchmark_baseline.json not found"
+
+    with open(baseline_path) as f:
+        data = json.loads(f.read())
+
+    assert "results" in data
+    assert len(data["results"]) == 10
+    assert "summary" in data
+
+    for r in data["results"]:
+        assert "prompt" in r
+        assert "answer" in r
+        assert "steps" in r
+        assert "prompt_tokens" in r
+        assert "completion_tokens" in r
+        assert "total_tokens" in r
+        assert "latency_s" in r
+        assert "cost_usd" in r
+        assert "tool_calls" in r
+
