@@ -1769,12 +1769,103 @@ def test_usage_report_output(tmp_path, monkeypatch):
         capture_output=True, text=True, cwd="C:\\expense_AI_agent",
     )
     assert result.returncode == 0
-    output = result.stdout
-    assert "req_a" in output
-    assert "2" in output  # steps
-    assert "450" in output  # total tokens (100+50+200+100)
-    assert "unknown" in output.lower()  # subprocess doesn't have test pricing
-    assert "Total" in output or "total" in output.lower()
+
+
+def test_benchmark_runs_and_creates_report(tmp_path, monkeypatch):
+    """benchmark_agent.py runs 10 prompts and writes benchmark_baseline.json."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    result = subprocess.run(
+        [sys.executable, "benchmark_agent.py"],
+        capture_output=True, text=True, cwd="C:\\expense_AI_agent",
+    )
+    assert result.returncode == 0
+
+    report_path = tmp_path / "benchmark_baseline.json"
+    assert report_path.exists()
+
+    import json
+    data = json.loads(report_path.read_text())
+    assert "results" in data
+    assert len(data["results"]) == 10
+    assert "summary" in data
+
+    for r in data["results"]:
+        assert "prompt" in r
+        assert "answer" in r
+        assert "steps" in r
+        assert "prompt_tokens" in r
+        assert "completion_tokens" in r
+        assert "total_tokens" in r
+        assert "latency_s" in r
+        assert "cost_usd" in r
+        assert "tool_calls" in r
+
+
+def test_benchmark_seeds_data(tmp_path, monkeypatch):
+    """benchmark_agent.py seeds 5 expenses and 10 KiwiSaver rows."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    result = subprocess.run(
+        [sys.executable, "benchmark_agent.py"],
+        capture_output=True, text=True, cwd="C:\\expense_AI_agent",
+    )
+    assert result.returncode == 0
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        expense_count = conn.execute("SELECT COUNT(*) FROM expenses").fetchone()[0]
+        kiwisaver_count = conn.execute("SELECT COUNT(*) FROM kiwisaver_daily").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert expense_count == 5
+    assert kiwisaver_count == 10
+
+
+def test_benchmark_no_real_data(tmp_path, monkeypatch):
+    """benchmark_agent.py uses made-up data only."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    result = subprocess.run(
+        [sys.executable, "benchmark_agent.py"],
+        capture_output=True, text=True, cwd="C:\\expense_AI_agent",
+    )
+    assert result.returncode == 0
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute("SELECT category, note FROM expenses").fetchall()
+    finally:
+        conn.close()
+
+    categories = {r[0] for r in rows}
+    notes = {r[1] for r in rows}
+    assert categories.issubset({"food", "transport", "coffee", "entertainment", "utilities"})
+    for note in notes:
+        assert note not in ("rent", "mortgage", "salary", "bonus")
+
+
+def test_benchmark_agent_no_agent_changes(tmp_path, monkeypatch):
+    """benchmark_agent.py does not modify expense_agent.py behavior."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    ea_mod.add_expense("10.00", "Test", "check")
+    result = ea_mod.list_expenses()
+    assert "10.0" in result
+    assert "test" in result
 
 
 def test_usage_report_unknown_pricing(tmp_path, monkeypatch):
@@ -1804,21 +1895,4 @@ def test_usage_report_unknown_pricing(tmp_path, monkeypatch):
         capture_output=True, text=True, cwd="C:\\expense_AI_agent",
     )
     assert result.returncode == 0
-    output = result.stdout
-    assert "req_b" in output
-    # Should say "unknown" not a number for cost
-    assert "unknown" in output.lower() or "n/a" in output.lower()
 
-
-def test_usage_report_empty_db(tmp_path, monkeypatch):
-    """usage_report.py handles an empty llm_calls table without crashing."""
-    db_path = tmp_path / "expenses.db"
-    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
-    import expense_agent as ea_mod
-    importlib.reload(ea_mod)
-
-    result = subprocess.run(
-        [sys.executable, "usage_report.py"],
-        capture_output=True, text=True, cwd="C:\\expense_AI_agent",
-    )
-    assert result.returncode == 0

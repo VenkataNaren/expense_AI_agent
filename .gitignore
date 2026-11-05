@@ -5,3 +5,4 @@ __pycache__/
 expenses.db
 *.db.bak-*
 *.csv
+benchmark_baseline.json
