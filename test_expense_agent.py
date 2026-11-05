@@ -1805,6 +1805,85 @@ def test_benchmark_runs_and_creates_report(tmp_path, monkeypatch):
         assert "tool_calls" in r
 
 
+def test_model_name_from_env_var(tmp_path, monkeypatch):
+    """MODEL should be read from NVIDIA_MODEL env var."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, _ = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+            "NVIDIA_MODEL": "test/custom-model-1",
+        },
+        db_path=db_path,
+    )
+    assert expense_agent.MODEL == "test/custom-model-1"
+
+
+def test_model_name_default(tmp_path, monkeypatch):
+    """MODEL should default to nemotron when NVIDIA_MODEL is not set."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, _ = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+        },
+        db_path=db_path,
+    )
+    assert expense_agent.MODEL == "nvidia/nemotron-3.5-super-vl-120b-a12b"
+
+
+def test_benchmark_compare_runs(tmp_path, monkeypatch):
+    """benchmark_compare.py should run with two model names and produce output."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "benchmark_compare.py",
+            "model-a",
+            "model-b",
+        ],
+        capture_output=True, text=True, cwd="C:\\expense_AI_agent",
+    )
+    assert result.returncode == 0
+    output = result.stdout
+    assert "model-a" in output.lower() or "model-a" in output
+    assert "model-b" in output.lower() or "model-b" in output
+    assert "steps" in output.lower()
+    assert "tokens" in output.lower()
+    assert "latency" in output.lower()
+    assert "cost" in output.lower()
+
+
+def test_benchmark_compare_output_format(tmp_path, monkeypatch):
+    """benchmark_compare.py output should contain comparison table columns."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "benchmark_compare.py",
+            "model-a",
+            "model-b",
+        ],
+        capture_output=True, text=True, cwd="C:\\expense_AI_agent",
+    )
+    assert result.returncode == 0
+    output = result.stdout.lower()
+    # Check for key column headers
+    assert "model" in output
+    assert "steps" in output
+    assert "tokens" in output
+    assert "latency" in output
+    assert "cost" in output
+
+
 def test_benchmark_seeds_data(tmp_path, monkeypatch):
     """benchmark_agent.py seeds 5 expenses and 10 KiwiSaver rows."""
     db_path = tmp_path / "expenses.db"
@@ -2497,4 +2576,83 @@ def test_benchmark_results_match_baseline(tmp_path, monkeypatch):
         assert "latency_s" in r
         assert "cost_usd" in r
         assert "tool_calls" in r
+
+
+def test_model_name_from_env_var(tmp_path, monkeypatch):
+    """MODEL should be read from NVIDIA_MODEL env var."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, _ = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+            "NVIDIA_MODEL": "test/custom-model-1",
+        },
+        db_path=db_path,
+    )
+    assert expense_agent.MODEL == "test/custom-model-1"
+
+
+def test_model_name_default(tmp_path, monkeypatch):
+    """MODEL should default to nemotron when NVIDIA_MODEL is not set."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, _ = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+        },
+        db_path=db_path,
+    )
+    assert expense_agent.MODEL == "nvidia/nemotron-3.5-super-vl-120b-a12b"
+
+
+def test_benchmark_compare_runs(tmp_path, monkeypatch):
+    """benchmark_compare.py should run with two model names and produce output."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "benchmark_compare.py",
+            "model-a",
+            "model-b",
+        ],
+        capture_output=True, text=True, cwd="C:\\expense_AI_agent",
+    )
+    assert result.returncode == 0
+    output = result.stdout
+    assert "model-a" in output.lower() or "model-a" in output
+    assert "model-b" in output.lower() or "model-b" in output
+    assert "steps" in output.lower()
+    assert "tokens" in output.lower()
+    assert "latency" in output.lower()
+    assert "cost" in output.lower()
+
+
+def test_benchmark_compare_output_format(tmp_path, monkeypatch):
+    """benchmark_compare.py output should contain comparison table columns."""
+    db_path = tmp_path / "expenses.db"
+    monkeypatch.setenv("EXPENSES_DB_PATH", str(db_path))
+    import expense_agent as ea_mod
+    importlib.reload(ea_mod)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "benchmark_compare.py",
+            "model-a",
+            "model-b",
+        ],
+        capture_output=True, text=True, cwd="C:\\expense_AI_agent",
+    )
+    assert result.returncode == 0
+    output = result.stdout.lower()
+    # Check for key column headers
+    assert "model" in output
+    assert "steps" in output
+    assert "tokens" in output
+    assert "latency" in output
+    assert "cost" in output
 
