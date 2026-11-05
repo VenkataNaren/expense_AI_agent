@@ -1504,3 +1504,138 @@ def test_agent_kiwisaver_performance_via_mocked_model(tmp_path, monkeypatch):
     # Verify the model's final answer and the not-financial-advice disclaimer
     assert "up 10%" in reply
     assert "not financial advice" in reply.lower()
+
+
+def test_llm_calls_rows_written(tmp_path, monkeypatch):
+    """run_agent writes one row per model call to llm_calls with tokens and latency."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, mock_openai = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+        },
+        db_path=db_path,
+    )
+
+    mock_client = mock_openai.return_value
+
+    response = mock.Mock()
+    response.id = "resp_abc123"
+    response.usage = mock.Mock()
+    response.usage.prompt_tokens = 120
+    response.usage.completion_tokens = 45
+    response.choices = [mock.Mock()]
+    response.choices[0].message = mock.Mock()
+    response.choices[0].message.tool_calls = []
+    response.choices[0].message.content = "Hello!"
+
+    mock_client.chat.completions.create.return_value = response
+
+    history = [{"role": "system", "content": expense_agent.SYSTEM_PROMPT}]
+    expense_agent.run_agent("hello", history)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute(
+            "SELECT request_id, step, model, prompt_tokens, completion_tokens, "
+            "latency_s, tool_name FROM llm_calls ORDER BY step"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert len(rows) == 1
+    assert rows[0][0] == "resp_abc123"  # request_id
+    assert rows[0][1] == 1  # step
+    assert rows[0][2] == expense_agent.MODEL  # model
+    assert rows[0][3] == 120  # prompt_tokens
+    assert rows[0][4] == 45  # completion_tokens
+    assert isinstance(rows[0][5], float)  # latency_s
+    assert rows[0][5] >= 0
+    assert rows[0][6] is None  # tool_name (no tool called)
+
+
+def test_llm_calls_missing_usage_field(tmp_path, monkeypatch):
+    """run_agent handles a missing usage field without crashing; stores NULL tokens."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, mock_openai = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "test-api-key",
+        },
+        db_path=db_path,
+    )
+
+    mock_client = mock_openai.return_value
+
+    response = mock.Mock()
+    response.id = "resp_no_usage"
+    del response.usage  # no usage field
+    response.choices = [mock.Mock()]
+    response.choices[0].message = mock.Mock()
+    response.choices[0].message.tool_calls = []
+    response.choices[0].message.content = "Done"
+
+    mock_client.chat.completions.create.return_value = response
+
+    history = [{"role": "system", "content": expense_agent.SYSTEM_PROMPT}]
+    reply, _ = expense_agent.run_agent("hello", history)
+
+    assert reply == "Done"
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute(
+            "SELECT prompt_tokens, completion_tokens FROM llm_calls"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert len(rows) == 1
+    assert rows[0][0] is None  # prompt_tokens NULL
+    assert rows[0][1] is None  # completion_tokens NULL
+
+
+def test_llm_calls_no_secrets_or_message_content(tmp_path, monkeypatch):
+    """llm_calls stores no API key or user message content."""
+    db_path = tmp_path / "expenses.db"
+    expense_agent, mock_openai = _reload_with_env(
+        {
+            "NVIDIA_BASE_URL": "https://test.example.com/v1",
+            "NVIDIA_API_KEY": "super-secret-key-12345",
+        },
+        db_path=db_path,
+    )
+
+    mock_client = mock_openai.return_value
+
+    response = mock.Mock()
+    response.id = "resp_xyz"
+    response.usage = mock.Mock()
+    response.usage.prompt_tokens = 10
+    response.usage.completion_tokens = 5
+    response.choices = [mock.Mock()]
+    response.choices[0].message = mock.Mock()
+    response.choices[0].message.tool_calls = []
+    response.choices[0].message.content = "Response"
+
+    mock_client.chat.completions.create.return_value = response
+
+    user_msg = "I spent $500 on a secret purchase at the mall"
+    history = [{"role": "system", "content": expense_agent.SYSTEM_PROMPT}]
+    expense_agent.run_agent(user_msg, history)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute(
+            "SELECT request_id, step, model, prompt_tokens, completion_tokens, "
+            "latency_s, tool_name FROM llm_calls"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert len(rows) == 1
+    row_text = " ".join(str(c) for c in rows[0] if c is not None)
+    assert "super-secret-key-12345" not in row_text
+    assert "$500" not in row_text
+    assert "secret purchase" not in row_text
+    assert "mall" not in row_text

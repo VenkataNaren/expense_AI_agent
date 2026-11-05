@@ -11,6 +11,7 @@ Setup:
 import json
 import os
 import sqlite3
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -98,6 +99,23 @@ def init_db():
             for col, coltype in expected.items():
                 if col not in existing:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")
+
+        # LLM call telemetry table.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS llm_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                request_id TEXT,
+                step INTEGER,
+                model TEXT,
+                prompt_tokens REAL,
+                completion_tokens REAL,
+                latency_s REAL,
+                tool_name TEXT
+            )
+            """
+        )
 
         conn.commit()
     finally:
@@ -1094,6 +1112,38 @@ SYSTEM_PROMPT = (
 )
 
 # ---------- 4. The agent loop ----------
+def _record_llm_call(request_id, step, model, prompt_tokens, completion_tokens, latency_s, tool_name):
+    """Record one model call to the llm_calls table.
+
+    Converts Mock objects or other non-SQLite types to their string
+    representation so tests with mocked clients don't break.
+    """
+    def _clean(value):
+        if value is None:
+            return None
+        if isinstance(value, (str, int, float, bool)):
+            return value
+        return str(value)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = _connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO llm_calls
+                (timestamp, request_id, step, model, prompt_tokens,
+                 completion_tokens, latency_s, tool_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (timestamp, _clean(request_id), step, _clean(model),
+             _clean(prompt_tokens), _clean(completion_tokens), latency_s,
+             _clean(tool_name)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def run_agent(user_message, history):
     now = datetime.now()
     current_time_str = now.strftime("%Y-%m-%d %I:%M %p (%A)")
@@ -1102,12 +1152,37 @@ def run_agent(user_message, history):
 
     tool_calls_made = []
 
-    for _ in range(MAX_STEPS):
+    for step in range(1, MAX_STEPS + 1):
+        start = time.perf_counter()
         response = client.chat.completions.create(
             model=MODEL, messages=history, tools=TOOLS
         )
+        latency_s = time.perf_counter() - start
+
         message = response.choices[0].message
         history.append(message)
+
+        # Record telemetry for this model call.
+        request_id = getattr(response, "id", None)
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            prompt_tokens = getattr(usage, "prompt_tokens", None)
+            completion_tokens = getattr(usage, "completion_tokens", None)
+        else:
+            prompt_tokens = None
+            completion_tokens = None
+        tool_name = None
+        if message.tool_calls:
+            tool_name = message.tool_calls[0].function.name
+        _record_llm_call(
+            request_id=request_id,
+            step=step,
+            model=MODEL,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            latency_s=latency_s,
+            tool_name=tool_name,
+        )
 
         # No tool requested -> the agent is done, return its answer
         if not message.tool_calls:
