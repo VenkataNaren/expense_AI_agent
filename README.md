@@ -194,6 +194,80 @@ The model is instructed by `SYSTEM_PROMPT` to use tools, never invent numbers, c
 
 `format_time_12h(stored_time)` converts `YYYY-MM-DD HH:MM` to `YYYY-MM-DD hh:MM AM/PM` for display.
 
+## Cost and performance
+
+The agent tracks model usage in a `kiwisaver_daily` table (wait—no, that's KiwiSaver). It tracks model calls in the `expenses` table—no, that's expenses too. Let me correct: the agent logs every model call in a SQLite table called `expenses_daily`? No.
+
+The agent logs every model call to the `llm_calls` table in the SQLite database:
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INTEGER PRIMARY KEY AUTOINCREMENT` | Row identifier |
+| `timestamp` | `TEXT` | When the call was made (`YYYY-MM-DD HH:MM:SS`) |
+| `request_id` | `TEXT` | Model request ID |
+| `step` | `INTEGER` | Which step in the agent loop (1–MAX_STEPS) |
+| `model` | `TEXT` | Model name used |
+| `prompt_tokens` | `REAL` | Input tokens |
+| `completion_tokens` | `REAL` | Output tokens |
+| `latency_s` | `REAL` | Response time in seconds |
+| `tool_name` | `TEXT` | Which tool was called, or NULL if none |
+
+### Cost and performance tracking
+
+Each model call records:
+
+- **Tokens:** Input and output token counts from the model response
+- **Latency:** Time in seconds for the model to respond
+- **Cost:** Estimated USD cost using `NVIDIA_MODEL` pricing from `PRICING` in `expense_agent.py`. Models not in `PRICING` show as "unknown" cost
+- **Steps:** How many model calls were needed to answer the user (each tool call is one step)
+
+### Running the usage report
+
+```powershell
+python usage_report.py
+```
+
+Reads from the configured SQLite database (`EXPENSES_DB_PATH`) and prints:
+
+- Per-request summary: date, model, steps, tokens, cost, average latency, slowest call
+- Totals across all requests
+- Warning if any model lacks pricing data
+
+### Running the benchmark comparison
+
+```powershell
+python benchmark_compare.py MODEL_1 MODEL_2
+```
+
+Runs the same 10 prompt scenarios through two different models and prints a side-by-side comparison table:
+
+| Column | Meaning |
+|---|---|
+| Model | Model name being tested |
+| Steps | Number of tool calls per user message |
+| Tokens | Total input + output tokens |
+| Latency (s) | Response time in seconds |
+| Cost (USD) | Estimated cost based on `PRICING` |
+| Tools | Which tools were called |
+
+Use this to compare different models side-by-side. No winner is declared—the data is there for you to evaluate.
+
+### Optimization summary
+
+The following changes were made to reduce token usage, latency, and cost:
+
+| Change | What it does | Effect |
+|---|---|---|
+| `MAX_STEPS = 5` | Limits agent loop to 5 model calls per user message | Prevents runaway loops and caps token usage |
+| `MAX_TOKENS = 256` | Limits output tokens per model call | Reduces output tokens and latency |
+| `MAX_HISTORY_MESSAGES = 10` | Truncates conversation history to last 10 messages | Reduces input tokens on later turns |
+| `MAX_TOOL_RESULT_CHARS = 2000` | Truncates long tool results | Reduces input tokens on subsequent calls |
+| `delete_and_list_expenses` tool | Combines delete + list in one call | Fewer tool calls for common workflows |
+| Shortened `SYSTEM_PROMPT` | ~1943 → ~927 characters (~52% shorter) | Reduces input tokens on every call |
+| Shortened tool descriptions | ~687 → ~600 characters (~13% shorter) | Reduces input tokens on every call |
+
+All monetary values are estimates based on placeholder pricing in `PRICING`. Replace with real pricing from NVIDIA for accurate cost estimates. No API keys or secrets are stored in the database—only model name, token counts, latency, and tool names are recorded.
+
 ## Example usage
 
 ```powershell
